@@ -27,27 +27,6 @@ Puedes verificar la lógica binaria abriendo las herramientas de desarrollo del 
 Stego.selfCheck(); // Devuelve true si todas las aserciones pasan
 ```
 
-## 3. Conceptos de Vue 3 aplicados (`app.js` + `index.html`)
-
-Este proyecto sirve como introducción práctica a la **Composition API** de Vue 3:
-
-- `createApp({ setup() { ... } }).mount('#app')`: inicializa la aplicación sobre el contenedor `#app`.
-- `ref()`: crea estado reactivo (`activeTab`, `encodeImg`, `message`, `decoded`, etc.).
-- `computed()`: calcula valores derivados automáticamente al cambiar las dependencias (`messageBytes`, `usedBitsPreview`, `usagePercent`, `isOverCapacity`, `canEncode`, `progressBarClass`).
-- `v-model`: enlace bidireccional entre el `<textarea>` y `message`.
-- `v-if`: renderizado condicional de pestañas, previsualización, alertas y resultados.
-- `:class` / `:disabled` / `:style` / `:href`: enlaces dinámicos de atributos (por ejemplo, la barra de progreso y la habilitación del botón).
-- `@change` / `@click`: manejo declarativo de eventos del DOM.
-- `v-cloak`: oculta las llaves `{{ ... }}` sin procesar mientras Vue termina de montarse.
-
-## 4. Cómo publicarlo en GitHub Pages
-
-1. Crea un repositorio nuevo en GitHub (público o privado según tu plan).
-2. Sube los 4 archivos de la carpeta (`index.html`, `stego.js`, `app.js`, `README.md`) a la rama `main`.
-3. En el repositorio, entra a **Settings → Pages**.
-4. En **Build and deployment**, selecciona **Deploy from a branch**, elige la rama `main` y la carpeta `/ (root)`, y guarda.
-5. En ~1 minuto GitHub te dará la URL pública `https://<tu-usuario>.github.io/<tu-repo>/`.
-
 ## 5. Advertencia importante sobre compresión
 
 Para que el destinatario pueda leer el mensaje, debes enviarle el archivo `.png` generado **sin compresión** (como **Documento / Archivo adjunto** en WhatsApp/Telegram, o por correo/Google Drive/WeTransfer). Si lo envías en modo **Foto**, la plataforma lo recomprimirá a JPEG/WebP y destruirá los bits menos significativos.
