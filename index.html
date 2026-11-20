@@ -8,6 +8,7 @@
     content="default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'none'; object-src 'none'; base-uri 'none';"
   >
   <title>Stego LSB — Mensajes ocultos en imágenes</title>
+  <script src="./theme-init.js"></script>
   <link href="./vendor/bootstrap.min.css" rel="stylesheet">
   <style>
     [v-cloak] {
@@ -26,9 +27,27 @@
       white-space: pre-wrap;
       word-break: break-word;
     }
+
+    .dropzone {
+      border: 2px dashed var(--bs-border-color);
+      background-color: var(--bs-tertiary-bg);
+      cursor: pointer;
+      transition: border-color 0.15s ease, background-color 0.15s ease;
+    }
+
+    .dropzone:hover,
+    .dropzone:focus-visible {
+      border-color: var(--bs-primary);
+      outline: none;
+    }
+
+    .dropzone.is-dragging {
+      border-color: var(--bs-primary);
+      background-color: var(--bs-primary-bg-subtle);
+    }
   </style>
 </head>
-<body class="bg-light">
+<body class="bg-body-tertiary">
   <noscript>
     <div class="container py-4">
       <div class="alert alert-warning mx-auto mb-0" style="max-width: 760px;" role="alert">
@@ -38,7 +57,7 @@
   </noscript>
   <div id="app" v-cloak class="container py-4">
     <div class="card shadow-sm mx-auto" style="max-width: 760px;">
-      <div class="card-header bg-white pt-4 pb-0 border-bottom-0">
+      <div class="card-header bg-body pt-4 pb-0 border-bottom-0">
         <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
           <div>
             <h1 class="h4 mb-1">Stego LSB</h1>
@@ -46,7 +65,41 @@
               Esteganografía en el bit menos significativo (LSB) 100% local en tu navegador. Ninguna imagen ni texto sale de tu dispositivo.
             </p>
           </div>
-          <span class="badge text-bg-secondary">Solo PNG sin compresión</span>
+          <div class="d-flex align-items-center flex-wrap gap-2">
+            <span class="badge text-bg-secondary">Solo PNG sin compresión</span>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Tema de color">
+              <button
+                type="button"
+                class="btn"
+                :class="theme === 'auto' ? 'btn-secondary' : 'btn-outline-secondary'"
+                :aria-pressed="theme === 'auto'"
+                data-theme-value="auto"
+                @click="theme = 'auto'"
+              >
+                Auto
+              </button>
+              <button
+                type="button"
+                class="btn"
+                :class="theme === 'light' ? 'btn-secondary' : 'btn-outline-secondary'"
+                :aria-pressed="theme === 'light'"
+                data-theme-value="light"
+                @click="theme = 'light'"
+              >
+                Claro
+              </button>
+              <button
+                type="button"
+                class="btn"
+                :class="theme === 'dark' ? 'btn-secondary' : 'btn-outline-secondary'"
+                :aria-pressed="theme === 'dark'"
+                data-theme-value="dark"
+                @click="theme = 'dark'"
+              >
+                Oscuro
+              </button>
+            </div>
+          </div>
         </div>
 
         <ul class="nav nav-tabs" role="tablist">
@@ -82,39 +135,75 @@
         <section v-if="activeTab === 'encode'" aria-label="Ocultar mensaje">
           <div class="mb-3">
             <label for="encode-file" class="form-label fw-semibold">
-              1. Selecciona una imagen base
+              1. Selecciona, arrastra o pega (Ctrl+V) una imagen base
             </label>
             <input
               id="encode-file"
+              ref="encodeFileInput"
               type="file"
-              class="form-control"
+              class="visually-hidden"
               accept="image/*"
               @change="onSelectEncodeFile"
             >
-            <div class="form-text">
-              Puedes partir desde PNG, JPG o WebP; el resultado se descargará siempre como PNG sin pérdida.
+            <div
+              class="dropzone rounded p-3 text-center"
+              :class="{ 'is-dragging': isDraggingEncode }"
+              role="button"
+              tabindex="0"
+              aria-label="Seleccionar o arrastrar imagen base"
+              @click="triggerEncodePicker"
+              @keydown.enter.prevent="triggerEncodePicker"
+              @keydown.space.prevent="triggerEncodePicker"
+              @dragenter.prevent="onEncodeDragEnter"
+              @dragover.prevent="isDraggingEncode = true"
+              @dragleave="onEncodeDragLeave"
+              @drop.prevent="onDropEncodeFile"
+            >
+              <div class="fw-semibold small">
+                <template v-if="isDraggingEncode">
+                  Suelta la imagen aquí para cargarla
+                </template>
+                <template v-else-if="encodeImg">
+                  Imagen cargada: {{ encodeImg.fileName }} · haz clic, arrastra o pega otra para reemplazar
+                </template>
+                <template v-else>
+                  Arrastra una imagen aquí, haz clic para elegir o pega con Ctrl+V
+                </template>
+              </div>
+              <div class="form-text mt-1 mb-0">
+                Puedes partir desde PNG, JPG o WebP; el resultado se descargará siempre como PNG sin pérdida.
+              </div>
             </div>
           </div>
 
           <div v-if="encodeImg" class="border rounded p-3 bg-body-tertiary mb-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div class="small text-muted text-truncate" :title="encodeImg.fileName">
+                {{ encodeImg.fileName }}
+              </div>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-danger"
+                @click="clearEncode"
+              >
+                Quitar
+              </button>
+            </div>
+
             <div class="row g-3 align-items-center">
               <div class="col-md-5 text-center">
                 <img
                   v-show="!showingDegradedCanvas"
                   :src="encodeImg.previewUrl"
                   :alt="encodeImg.fileName"
-                  class="img-fluid rounded border bg-white preview-img"
+                  class="img-fluid rounded border bg-body preview-img"
                 >
                 <canvas
                   ref="livePreviewCanvas"
                   v-show="showingDegradedCanvas"
-                  class="img-fluid rounded border bg-white preview-img"
+                  class="img-fluid rounded border bg-body preview-img"
                   aria-label="Vista previa degradada en vivo"
                 ></canvas>
-
-                <div class="small text-muted text-truncate mt-1" :title="encodeImg.fileName">
-                  {{ encodeImg.fileName }}
-                </div>
 
                 <div v-if="isDegrading" class="d-flex flex-column align-items-center gap-1 mt-2">
                   <div class="d-flex flex-wrap justify-content-center align-items-center gap-1">
@@ -153,13 +242,13 @@
               <div class="col-md-7">
                 <div class="row g-2 small">
                   <div class="col-6">
-                    <div class="p-2 bg-white border rounded h-100">
+                    <div class="p-2 bg-body border rounded h-100">
                       <div class="text-muted">Resolución</div>
                       <div class="fw-semibold">{{ encodeImg.width }} × {{ encodeImg.height }} px</div>
                     </div>
                   </div>
                   <div class="col-6">
-                    <div class="p-2 bg-white border rounded h-100">
+                    <div class="p-2 bg-body border rounded h-100">
                       <div class="text-muted">Píxeles opacos (A=255)</div>
                       <div class="fw-semibold">
                         {{ formatNumber(encodeImg.opaquePixels) }} / {{ formatNumber(encodeImg.totalPixels) }}
@@ -167,7 +256,7 @@
                     </div>
                   </div>
                   <div class="col-6">
-                    <div class="p-2 bg-white border rounded h-100">
+                    <div class="p-2 bg-body border rounded h-100">
                       <div class="text-muted">Sin pérdida visual (plano 1/8)</div>
                       <div class="fw-semibold">
                         hasta {{ formatNumber(encodeImg.losslessBytes) }} car. ASCII
@@ -176,7 +265,7 @@
                     </div>
                   </div>
                   <div class="col-6">
-                    <div class="p-2 bg-white border rounded h-100">
+                    <div class="p-2 bg-body border rounded h-100">
                       <div class="text-muted">Máximo degradando (8 bits/canal)</div>
                       <div class="fw-semibold">
                         hasta {{ formatNumber(encodeImg.maxTotalBytes) }} car.
@@ -187,6 +276,11 @@
                 </div>
               </div>
             </div>
+          </div>
+
+          <div v-if="isLargeImage" class="alert alert-info py-2 small" role="note">
+            <strong>Imagen grande ({{ formatNumber(encodeImg.totalPixels) }} px, &gt; 8 MP):</strong>
+            codificar y exportar el PNG sin pérdida puede tardar unos segundos y generar un archivo pesado (además, Safari en iOS limita los lienzos a ~16,7 MP).
           </div>
 
           <div class="mb-3">
@@ -209,7 +303,7 @@
                 </span>
                 <span
                   v-if="isDegrading && livePsnrDb !== null"
-                  class="badge text-bg-light border"
+                  class="badge bg-body-secondary text-body border"
                   title="Relación señal a ruido pico (PSNR): menor dB implica mayor degradación visual"
                 >
                   PSNR: {{ formatPsnr(livePsnrDb) }}
@@ -303,13 +397,22 @@
                   se ocultaron {{ formatNumber(encodeResult.messageBytes) }} bytes
                   ({{ formatNumber(encodeResult.usedBits) }} bits · plano {{ encodeResult.planesUsed }}/8<template v-if="encodeResult.planesUsed > 1"> · PSNR {{ formatPsnr(encodeResult.psnrDb) }}</template>).
                 </div>
-                <a
-                  :href="encodeResult.downloadUrl"
-                  :download="encodeResult.downloadName"
-                  class="btn btn-sm btn-outline-success"
-                >
-                  Descargar PNG nuevamente
-                </a>
+                <div class="d-flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-success"
+                    @click="verifyEncodedInDecode"
+                  >
+                    Verificar en 'Leer mensaje'
+                  </button>
+                  <a
+                    :href="encodeResult.downloadUrl"
+                    :download="encodeResult.downloadName"
+                    class="btn btn-sm btn-outline-success"
+                  >
+                    Descargar PNG nuevamente
+                  </a>
+                </div>
               </div>
             </div>
 
@@ -323,39 +426,79 @@
         <section v-if="activeTab === 'decode'" aria-label="Leer mensaje">
           <div class="mb-3">
             <label for="decode-file" class="form-label fw-semibold">
-              Selecciona la imagen PNG con el mensaje oculto
+              Selecciona, arrastra o pega (Ctrl+V) la imagen PNG con el mensaje oculto
             </label>
             <input
               id="decode-file"
+              ref="decodeFileInput"
               type="file"
-              class="form-control"
+              class="visually-hidden"
               accept="image/png,image/*"
               @change="onSelectDecodeFile"
             >
+            <div
+              class="dropzone rounded p-3 text-center"
+              :class="{ 'is-dragging': isDraggingDecode }"
+              role="button"
+              tabindex="0"
+              aria-label="Seleccionar o arrastrar imagen PNG para leer mensaje"
+              @click="triggerDecodePicker"
+              @keydown.enter.prevent="triggerDecodePicker"
+              @keydown.space.prevent="triggerDecodePicker"
+              @dragenter.prevent="onDecodeDragEnter"
+              @dragover.prevent="isDraggingDecode = true"
+              @dragleave="onDecodeDragLeave"
+              @drop.prevent="onDropDecodeFile"
+            >
+              <div class="fw-semibold small">
+                <template v-if="isDraggingDecode">
+                  Suelta el archivo PNG aquí para leer el mensaje
+                </template>
+                <template v-else-if="decodeImg">
+                  Imagen cargada: {{ decodeImg.fileName }} · haz clic o arrastra otra para reemplazar
+                </template>
+                <template v-else>
+                  Arrastra el PNG aquí, haz clic para elegir o pega con Ctrl+V
+                </template>
+              </div>
+              <div class="form-text mt-1 mb-0">
+                Para decodificar, prefiere arrastrar o seleccionar el archivo .png original (el portapapeles puede recodificar la imagen).
+              </div>
+            </div>
           </div>
 
           <div v-if="decodeImg" class="border rounded p-3 bg-body-tertiary mb-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div class="small text-muted text-truncate" :title="decodeImg.fileName">
+                {{ decodeImg.fileName }}
+              </div>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-danger"
+                @click="clearDecode"
+              >
+                Quitar
+              </button>
+            </div>
+
             <div class="row g-3 align-items-center">
               <div class="col-md-5 text-center">
                 <img
                   :src="decodeImg.previewUrl"
                   :alt="decodeImg.fileName"
-                  class="img-fluid rounded border bg-white preview-img"
+                  class="img-fluid rounded border bg-body preview-img"
                 >
-                <div class="small text-muted text-truncate mt-1" :title="decodeImg.fileName">
-                  {{ decodeImg.fileName }}
-                </div>
               </div>
               <div class="col-md-7">
                 <div class="row g-2 small">
                   <div class="col-6">
-                    <div class="p-2 bg-white border rounded h-100">
+                    <div class="p-2 bg-body border rounded h-100">
                       <div class="text-muted">Resolución</div>
                       <div class="fw-semibold">{{ decodeImg.width }} × {{ decodeImg.height }} px</div>
                     </div>
                   </div>
                   <div class="col-6">
-                    <div class="p-2 bg-white border rounded h-100">
+                    <div class="p-2 bg-body border rounded h-100">
                       <div class="text-muted">Píxeles opacos (A=255)</div>
                       <div class="fw-semibold">
                         {{ formatNumber(decodeImg.opaquePixels) }} / {{ formatNumber(decodeImg.totalPixels) }}
@@ -364,7 +507,7 @@
                   </div>
                   <template v-if="decoded">
                     <div class="col-6">
-                      <div class="p-2 bg-white border rounded h-100">
+                      <div class="p-2 bg-body border rounded h-100">
                         <div class="text-muted">Mensaje recuperado</div>
                         <div class="fw-semibold d-flex align-items-center flex-wrap gap-1">
                           <span>{{ formatNumber(decoded.messageBytes) }} bytes</span>
@@ -373,7 +516,7 @@
                       </div>
                     </div>
                     <div class="col-6">
-                      <div class="p-2 bg-white border rounded h-100">
+                      <div class="p-2 bg-body border rounded h-100">
                         <div class="text-muted">
                           {{ decoded.version === 2 ? 'Planos y bits usados' : 'Bits LSB usados' }}
                         </div>

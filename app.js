@@ -1,4 +1,4 @@
-// Composition API de Vue 3: ref()/shallowRef(), computed(), watch() y template refs.
+// Composition API de Vue 3: ref()/shallowRef(), computed(), watch(), template refs y ciclo de vida.
 import {
   createApp,
   ref,
@@ -6,20 +6,97 @@ import {
   computed,
   watch,
   nextTick,
+  onMounted,
   onUnmounted
 } from './vendor/vue.esm-browser.prod.js';
 import * as Stego from './stego.js';
+
+const THEME_STORAGE_KEY = 'stego-theme';
+
+function readStoredTheme() {
+  try {
+    const value = localStorage.getItem(THEME_STORAGE_KEY);
+    if (value === 'light' || value === 'dark' || value === 'auto') {
+      return value;
+    }
+  } catch {
+    // Almacenamiento no disponible o restringido.
+  }
+  return 'auto';
+}
+
+function extractPastedImageFile(event) {
+  const dt = event.clipboardData;
+  if (!dt) return null;
+
+  if (dt.items && dt.items.length > 0) {
+    for (const item of dt.items) {
+      if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) return file;
+      }
+    }
+  }
+
+  if (dt.files && dt.files.length > 0) {
+    for (const file of dt.files) {
+      if (file.type && file.type.startsWith('image/')) {
+        return file;
+      }
+    }
+  }
+
+  return null;
+}
 
 createApp({
   setup() {
     const activeTab = ref('encode');
 
+    // Tema visual Bootstrap 5.3 ('auto' | 'light' | 'dark')
+    const theme = ref(readStoredTheme());
+    const darkMediaQuery =
+      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia('(prefers-color-scheme: dark)')
+        : null;
+
+    function resolveTheme(mode) {
+      if (mode === 'auto') {
+        return darkMediaQuery?.matches ? 'dark' : 'light';
+      }
+      return mode;
+    }
+
+    function applyTheme(mode) {
+      document.documentElement.setAttribute('data-bs-theme', resolveTheme(mode));
+    }
+
+    function onSystemThemeChange() {
+      if (theme.value === 'auto') {
+        applyTheme('auto');
+      }
+    }
+
+    applyTheme(theme.value);
+
+    watch(theme, (nextTheme) => {
+      applyTheme(nextTheme);
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+      } catch {
+        // Ignorar si localStorage está bloqueado.
+      }
+    });
+
     // Estado de codificación ("Ocultar mensaje")
+    const encodeFileInput = ref(null);
     const encodeImg = shallowRef(null);
     const message = ref('');
     const encodeError = ref('');
     const encodeResult = shallowRef(null);
     const isEncoding = ref(false);
+    const isDraggingEncode = ref(false);
+    let encodeDragDepth = 0;
 
     // Vista previa en vivo de degradación progresiva (<canvas>)
     const livePreviewCanvas = ref(null);
@@ -32,9 +109,12 @@ createApp({
     let lastPreviewFrame = null;
 
     // Estado de decodificación ("Leer mensaje")
+    const decodeFileInput = ref(null);
     const decodeImg = shallowRef(null);
     const decoded = shallowRef(null);
     const decodeError = ref('');
+    const isDraggingDecode = ref(false);
+    let decodeDragDepth = 0;
     const copied = ref(false);
     let copyTimer = null;
 
@@ -141,6 +221,31 @@ createApp({
       clearEncodeResult();
     }
 
+    function clearEncode() {
+      revokeEncodeUrls();
+      resetLivePreview();
+      encodeImg.value = null;
+      encodeError.value = '';
+      if (encodeFileInput.value) {
+        encodeFileInput.value.value = '';
+      }
+    }
+
+    function clearDecode() {
+      if (decodeImg.value?.previewUrl) {
+        URL.revokeObjectURL(decodeImg.value.previewUrl);
+      }
+      clearTimeout(copyTimer);
+      copyTimer = null;
+      decodeImg.value = null;
+      decoded.value = null;
+      decodeError.value = '';
+      copied.value = false;
+      if (decodeFileInput.value) {
+        decodeFileInput.value.value = '';
+      }
+    }
+
     function waitForPaint() {
       return new Promise((resolve) => {
         const fallback = setTimeout(resolve, 50);
@@ -233,7 +338,31 @@ createApp({
       }
     });
 
+    function onWindowPaste(event) {
+      const file = extractPastedImageFile(event);
+      if (!file) return;
+
+      event.preventDefault();
+      const namedFile =
+        file.name && file.name.trim()
+          ? file
+          : new File([file], 'portapapeles.png', { type: file.type || 'image/png' });
+
+      if (activeTab.value === 'encode') {
+        loadEncodeFile(namedFile);
+      } else if (activeTab.value === 'decode') {
+        loadDecodeFile(namedFile, { fromPaste: true });
+      }
+    }
+
+    onMounted(() => {
+      window.addEventListener('paste', onWindowPaste);
+      darkMediaQuery?.addEventListener?.('change', onSystemThemeChange);
+    });
+
     onUnmounted(() => {
+      window.removeEventListener('paste', onWindowPaste);
+      darkMediaQuery?.removeEventListener?.('change', onSystemThemeChange);
       clearTimeout(previewTimer);
       clearTimeout(copyTimer);
       revokeEncodeUrls();
@@ -271,8 +400,55 @@ createApp({
       showOriginalPreview.value = false;
     }
 
-    async function onSelectEncodeFile(event) {
-      const file = event.target.files?.[0];
+    function triggerEncodePicker() {
+      encodeFileInput.value?.click();
+    }
+
+    function triggerDecodePicker() {
+      decodeFileInput.value?.click();
+    }
+
+    function onEncodeDragEnter() {
+      encodeDragDepth += 1;
+      isDraggingEncode.value = true;
+    }
+
+    function onEncodeDragLeave() {
+      encodeDragDepth = Math.max(0, encodeDragDepth - 1);
+      if (encodeDragDepth === 0) {
+        isDraggingEncode.value = false;
+      }
+    }
+
+    async function onDropEncodeFile(event) {
+      encodeDragDepth = 0;
+      isDraggingEncode.value = false;
+      const file = event.dataTransfer?.files?.[0];
+      if (!file) return;
+      await loadEncodeFile(file);
+    }
+
+    function onDecodeDragEnter() {
+      decodeDragDepth += 1;
+      isDraggingDecode.value = true;
+    }
+
+    function onDecodeDragLeave() {
+      decodeDragDepth = Math.max(0, decodeDragDepth - 1);
+      if (decodeDragDepth === 0) {
+        isDraggingDecode.value = false;
+      }
+    }
+
+    async function onDropDecodeFile(event) {
+      decodeDragDepth = 0;
+      isDraggingDecode.value = false;
+      const file = event.dataTransfer?.files?.[0];
+      if (!file) return;
+      await loadDecodeFile(file, { fromPaste: false });
+    }
+
+    async function loadEncodeFile(file) {
       if (!file) return;
 
       revokeEncodeUrls();
@@ -290,6 +466,13 @@ createApp({
       } catch (err) {
         encodeError.value = err.message || 'No se pudo cargar la imagen.';
       }
+    }
+
+    async function onSelectEncodeFile(event) {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file) return;
+      await loadEncodeFile(file);
     }
 
     async function handleEncode() {
@@ -326,6 +509,7 @@ createApp({
             : encoded.quality.losslessPercent;
 
         encodeResult.value = {
+          blob,
           downloadUrl,
           downloadName,
           version: encoded.version,
@@ -350,13 +534,25 @@ createApp({
       }
     }
 
-    async function onSelectDecodeFile(event) {
-      const file = event.target.files?.[0];
+    async function verifyEncodedInDecode() {
+      if (!encodeResult.value?.blob) return;
+      const file = new File(
+        [encodeResult.value.blob],
+        encodeResult.value.downloadName,
+        { type: 'image/png' }
+      );
+      activeTab.value = 'decode';
+      await loadDecodeFile(file, { fromPaste: false });
+    }
+
+    async function loadDecodeFile(file, { fromPaste = false } = {}) {
       if (!file) return;
 
       if (decodeImg.value?.previewUrl) {
         URL.revokeObjectURL(decodeImg.value.previewUrl);
       }
+      clearTimeout(copyTimer);
+      copyTimer = null;
       decodeImg.value = null;
       decoded.value = null;
       decodeError.value = '';
@@ -374,8 +570,18 @@ createApp({
           usagePercent: baseBits > 0 ? (result.usedBits / baseBits) * 100 : 0
         };
       } catch (err) {
-        decodeError.value = err.message || 'No se pudo leer el mensaje de la imagen.';
+        const baseMessage = err.message || 'No se pudo leer el mensaje de la imagen.';
+        decodeError.value = fromPaste
+          ? `${baseMessage} Nota: pegar una imagen desde el portapapeles suele recodificar los píxeles y alterar los bits LSB; prefiere arrastrar o seleccionar el archivo .png original.`
+          : baseMessage;
       }
+    }
+
+    async function onSelectDecodeFile(event) {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file) return;
+      await loadDecodeFile(file, { fromPaste: false });
     }
 
     async function copyMessage() {
@@ -431,20 +637,25 @@ createApp({
 
     return {
       activeTab,
+      theme,
+      encodeFileInput,
       encodeImg,
       message,
       encodeError,
       encodeResult,
       isEncoding,
+      isDraggingEncode,
       livePreviewCanvas,
       livePsnrDb,
       showOriginalPreview,
       hasLivePreview,
       livePreviewStale,
       isRenderingPreview,
+      decodeFileInput,
       decodeImg,
       decoded,
       decodeError,
+      isDraggingDecode,
       copied,
       messageBytes,
       usedBitsPreview,
@@ -459,10 +670,23 @@ createApp({
       progressBarClass,
       qualityBadgeClass,
       qualityBadgeLabel,
+      clearEncode,
+      clearDecode,
       renderDegradedPreview,
       simulateNextPlane,
+      triggerEncodePicker,
+      triggerDecodePicker,
+      onEncodeDragEnter,
+      onEncodeDragLeave,
+      onDropEncodeFile,
+      onDecodeDragEnter,
+      onDecodeDragLeave,
+      onDropDecodeFile,
+      loadEncodeFile,
       onSelectEncodeFile,
       handleEncode,
+      verifyEncodedInDecode,
+      loadDecodeFile,
       onSelectDecodeFile,
       copyMessage,
       formatBytes,
