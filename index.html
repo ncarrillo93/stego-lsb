@@ -23,6 +23,59 @@
       object-fit: contain;
     }
 
+    .compare-stage {
+      position: relative;
+      display: inline-block;
+      max-width: 100%;
+      overflow: hidden;
+      line-height: 0;
+    }
+
+    .compare-base {
+      display: block;
+    }
+
+    .compare-overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      pointer-events: none;
+    }
+
+    .compare-divider {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      transform: translateX(-1px);
+      background-color: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+      pointer-events: none;
+    }
+
+    .compare-tag {
+      position: absolute;
+      bottom: 6px;
+      padding: 2px 6px;
+      font-size: 0.68rem;
+      line-height: 1.2;
+      font-weight: 600;
+      border-radius: 4px;
+      color: #fff;
+      background-color: rgba(0, 0, 0, 0.62);
+      pointer-events: none;
+    }
+
+    .compare-tag-left {
+      left: 6px;
+    }
+
+    .compare-tag-right {
+      right: 6px;
+    }
+
     .decoded-box {
       white-space: pre-wrap;
       word-break: break-word;
@@ -116,9 +169,18 @@
         <!-- Pestaña 1: Ocultar mensaje -->
         <section v-if="activeTab === 'encode'" aria-label="Ocultar mensaje">
           <div class="mb-3">
-            <label for="encode-file" class="form-label fw-semibold">
-              1. Selecciona, arrastra o pega (Ctrl+V) una imagen base
-            </label>
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-1">
+              <label for="encode-file" class="form-label fw-semibold mb-0">
+                1. Selecciona, arrastra o pega (Ctrl+V) una imagen base
+              </label>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-primary"
+                @click="loadSampleImage"
+              >
+                Probar con imagen de ejemplo
+              </button>
+            </div>
             <input
               id="encode-file"
               ref="encodeFileInput"
@@ -161,7 +223,7 @@
           <div v-if="encodeImg" class="border rounded p-3 bg-body-tertiary mb-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div class="small text-muted text-truncate" :title="encodeImg.fileName">
-                {{ encodeImg.fileName }}
+                {{ encodeImg.fileName }} · {{ formatBytes(encodeImg.fileSize) }}
               </div>
               <button
                 type="button"
@@ -174,36 +236,56 @@
 
             <div class="row g-3 align-items-center">
               <div class="col-md-5 text-center">
-                <img
-                  v-show="!showingDegradedCanvas"
-                  :src="encodeImg.previewUrl"
-                  :alt="encodeImg.fileName"
-                  class="img-fluid rounded border bg-body preview-img"
-                >
-                <canvas
-                  ref="livePreviewCanvas"
-                  v-show="showingDegradedCanvas"
-                  class="img-fluid rounded border bg-body preview-img"
-                  aria-label="Vista previa degradada en vivo"
-                ></canvas>
+                <div class="compare-stage rounded border bg-body">
+                  <img
+                    :src="encodeImg.previewUrl"
+                    :alt="encodeImg.fileName"
+                    class="compare-base preview-img"
+                  >
+                  <canvas
+                    ref="livePreviewCanvas"
+                    v-show="showingDegradedCanvas"
+                    class="compare-overlay"
+                    :style="{ clipPath: 'inset(0 0 0 ' + splitPercent + '%)' }"
+                    aria-label="Vista previa degradada en vivo"
+                  ></canvas>
+                  <div
+                    v-if="showingDegradedCanvas"
+                    class="compare-divider"
+                    :style="{ left: splitPercent + '%' }"
+                    aria-hidden="true"
+                  ></div>
+                  <span
+                    v-if="showingDegradedCanvas && splitPercent > 12"
+                    class="compare-tag compare-tag-left"
+                    aria-hidden="true"
+                  >
+                    Original
+                  </span>
+                  <span
+                    v-if="showingDegradedCanvas && splitPercent < 88"
+                    class="compare-tag compare-tag-right"
+                    aria-hidden="true"
+                  >
+                    Degradada
+                  </span>
+                </div>
 
                 <div v-if="isDegrading" class="d-flex flex-column align-items-center gap-1 mt-2">
-                  <div class="d-flex flex-wrap justify-content-center align-items-center gap-1">
-                    <span
-                      v-if="hasLivePreview"
-                      class="badge"
-                      :class="showOriginalPreview ? 'text-bg-secondary' : 'text-bg-warning'"
+                  <div v-if="showingDegradedCanvas" class="w-100 px-1">
+                    <div class="d-flex justify-content-between align-items-center small text-muted mb-1">
+                      <span>Original ({{ splitPercent }}%)</span>
+                      <span>Degradada ({{ 100 - splitPercent }}%)</span>
+                    </div>
+                    <input
+                      id="compare-split"
+                      v-model.number="splitPercent"
+                      type="range"
+                      class="form-range"
+                      min="0"
+                      max="100"
+                      aria-label="Comparar imagen original y degradada"
                     >
-                      {{ showOriginalPreview ? 'Original' : 'Vista degradada' }}
-                    </span>
-                    <button
-                      type="button"
-                      class="btn btn-sm btn-outline-secondary"
-                      :disabled="!hasLivePreview"
-                      @click="showOriginalPreview = !showOriginalPreview"
-                    >
-                      {{ showOriginalPreview ? 'Ver degradada' : 'Ver original' }}
-                    </button>
                   </div>
 
                   <div v-if="isEncryptedEncode" class="small text-muted">
@@ -231,6 +313,9 @@
                     <div class="p-2 bg-body border rounded h-100">
                       <div class="text-muted">Resolución</div>
                       <div class="fw-semibold">{{ encodeImg.width }} × {{ encodeImg.height }} px</div>
+                      <div v-if="encodeImg.isResized && encodeOriginalDims" class="text-muted">
+                        Original: {{ encodeOriginalDims.width }} × {{ encodeOriginalDims.height }} px
+                      </div>
                     </div>
                   </div>
                   <div class="col-6">
@@ -257,6 +342,29 @@
                         hasta {{ formatNumber(capacityBudget.maxTotalBytes) }} car.
                       </div>
                       <div class="text-muted">({{ formatBytes(capacityBudget.maxTotalBytes) }})</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="canResizeEncode" class="mt-2 pt-2 border-top">
+                  <div class="form-check form-switch mb-0">
+                    <input
+                      id="encode-resize"
+                      v-model="resizeBeforeEncode"
+                      class="form-check-input"
+                      type="checkbox"
+                      :disabled="isResizingImage"
+                    >
+                    <label class="form-check-label small fw-semibold" for="encode-resize">
+                      Reducir a máx. {{ MAX_RESIZE_DIM }} px antes de ocultar
+                    </label>
+                    <div class="form-text mt-0">
+                      <template v-if="isResizingImage">
+                        Redimensionando imagen...
+                      </template>
+                      <template v-else>
+                        Reduce el peso del PNG final manteniendo proporción y transparencia (A=0).
+                      </template>
                     </div>
                   </div>
                 </div>
@@ -464,6 +572,9 @@
                     <strong>Imagen lista (STG{{ encodeResult.version }}):</strong>
                     se ocultaron {{ formatNumber(encodeResult.messageBytes) }} bytes
                     ({{ formatNumber(encodeResult.usedBits) }} bits · plano {{ encodeResult.planesUsed }}/8<template v-if="encodeResult.planesUsed > 1"> · PSNR {{ formatPsnr(encodeResult.psnrDb) }}</template>).
+                  </div>
+                  <div class="text-muted mt-1">
+                    Peso del archivo: <strong>{{ formatBytes(encodeResult.inputSize) }} → {{ formatBytes(encodeResult.outputSize) }}</strong> (PNG)
                   </div>
                   <div
                     v-if="encodeResult.encrypted || encodeResult.compressed || encodeResult.scattered"

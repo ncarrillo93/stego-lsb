@@ -12,6 +12,7 @@ import {
 import * as Stego from './stego.js';
 
 const THEME_STORAGE_KEY = 'stego-theme';
+const MAX_RESIZE_DIM = 1600;
 const HEADER_OPAQUE_PIXELS_ENCRYPTED = (Stego.HEADER_BYTES_V2_ENCRYPTED * 8) / 3; // 104 px
 const utf8Encoder = new TextEncoder();
 
@@ -81,6 +82,148 @@ function generateHighEntropyAscii(length) {
   return out.join('');
 }
 
+// Genera una imagen de ejemplo 256×256 al vuelo (0 KB en repo) con degradado, formas nítidas y esquina A=0.
+function createSampleImageFile() {
+  return new Promise((resolve, reject) => {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d', { colorSpace: 'srgb' });
+    if (!ctx) {
+      reject(new Error('No se pudo generar la imagen de ejemplo en el lienzo.'));
+      return;
+    }
+
+    // Fondo con degradado suave para evidenciar fácilmente la degradación por planos de bits.
+    const bg = ctx.createLinearGradient(0, 0, size, size);
+    bg.addColorStop(0, '#1e3a8a');
+    bg.addColorStop(0.5, '#0d9488');
+    bg.addColorStop(1, '#f59e0b');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, size, size);
+
+    // Formas geométricas nítidas y barras de color para evaluar bordes y posterización.
+    ctx.fillStyle = '#0f172a';
+    ctx.beginPath();
+    ctx.arc(84, 108, 48, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#fef08a';
+    ctx.beginPath();
+    ctx.arc(84, 108, 28, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#e11d48';
+    ctx.fillRect(142, 76, 86, 56);
+
+    ctx.fillStyle = '#38bdf8';
+    ctx.beginPath();
+    ctx.moveTo(142, 132);
+    ctx.lineTo(185, 76);
+    ctx.lineTo(228, 132);
+    ctx.closePath();
+    ctx.fill();
+
+    const palette = ['#ef4444', '#22c55e', '#3b82f6', '#eab308', '#f8fafc', '#111827'];
+    const barW = Math.floor(216 / palette.length);
+    for (let i = 0; i < palette.length; i++) {
+      ctx.fillStyle = palette[i];
+      ctx.fillRect(20 + i * barW, 166, barW, 20);
+    }
+
+    // Etiqueta legible "Stego LSB".
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(20, 200, 216, 36);
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 20px system-ui, -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Stego LSB', 128, 219);
+
+    // Esquina superior derecha 48×48 completamente transparente (A=0) para demostrar preservación alfa.
+    ctx.clearRect(size - 48, 0, 48, 48);
+
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('No se pudo exportar la imagen de ejemplo PNG.'));
+        return;
+      }
+      resolve(new File([blob], 'ejemplo-stego.png', { type: 'image/png' }));
+    }, 'image/png');
+  });
+}
+
+// Redimensiona una imagen en <canvas> preservando proporción exacta y transparencia (A=0).
+function loadResizedImageFile(file, maxDim) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith('image/')) {
+      reject(new Error('Selecciona un archivo de imagen válido.'));
+      return;
+    }
+
+    const tempUrl = URL.createObjectURL(file);
+    const img = new Image();
+
+    img.onload = () => {
+      URL.revokeObjectURL(tempUrl);
+      try {
+        const srcW = img.naturalWidth;
+        const srcH = img.naturalHeight;
+        if (srcW === 0 || srcH === 0) {
+          throw new Error('No se pudo leer la imagen en el lienzo del navegador.');
+        }
+
+        const scale = maxDim / Math.max(srcW, srcH);
+        const targetW = Math.max(1, Math.round(srcW * scale));
+        const targetH = Math.max(1, Math.round(srcH * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+
+        const ctx = canvas.getContext('2d', { willReadFrequently: true, colorSpace: 'srgb' });
+        if (!ctx) {
+          throw new Error('No se pudo inicializar el lienzo para redimensionar la imagen.');
+        }
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+
+        const imageData = ctx.getImageData(0, 0, targetW, targetH);
+        const stats = Stego.analyzeImageData(imageData);
+
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error('No se pudo generar la vista previa redimensionada.'));
+            return;
+          }
+          const previewUrl = URL.createObjectURL(blob);
+          resolve({
+            fileName: file.name,
+            fileType: file.type,
+            fileSize: file.size,
+            isResized: true,
+            previewUrl,
+            imageData,
+            ...stats
+          });
+        }, 'image/png');
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error('Error al redimensionar la imagen.'));
+      }
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(tempUrl);
+      reject(new Error('No se pudo cargar el archivo de imagen para redimensionarlo.'));
+    };
+
+    img.src = tempUrl;
+  });
+}
+
 createApp({
   setup() {
     const activeTab = ref('encode');
@@ -112,6 +255,10 @@ createApp({
 
     // Estado de codificación ("Ocultar mensaje")
     const encodeFileInput = ref(null);
+    const encodeSourceFile = shallowRef(null);
+    const encodeOriginalDims = shallowRef(null);
+    const resizeBeforeEncode = ref(false);
+    const isResizingImage = ref(false);
     const encodeImg = shallowRef(null);
     const message = ref('');
     const encodePassword = ref('');
@@ -123,6 +270,7 @@ createApp({
     const isEncoding = ref(false);
     const isDraggingEncode = ref(false);
     let encodeDragDepth = 0;
+    let encodeLoadSeq = 0;
 
     // Estimación asíncrona con debounce de compresión deflate-raw
     const estimatedCompressedBytes = ref(null);
@@ -130,10 +278,10 @@ createApp({
     let compressionTimer = null;
     let compressionReqSeq = 0;
 
-    // Vista previa en vivo de degradación progresiva (<canvas>)
+    // Vista previa en vivo de degradación progresiva (<canvas>) + comparador Antes/Después
     const livePreviewCanvas = ref(null);
     const livePsnrDb = ref(null);
-    const showOriginalPreview = ref(false);
+    const splitPercent = ref(50);
     const hasLivePreview = ref(false);
     const livePreviewStale = ref(false);
     const isRenderingPreview = ref(false);
@@ -158,6 +306,13 @@ createApp({
     const isEncryptedEncode = computed(() => encodePassword.value.length > 0);
     const isScatteredEncode = computed(() => isEncryptedEncode.value && useScatter.value);
     const isCompressedActive = computed(() => useCompression.value && compressionSupported);
+
+    const canResizeEncode = computed(
+      () =>
+        Boolean(encodeOriginalDims.value) &&
+        (encodeOriginalDims.value.width > MAX_RESIZE_DIM ||
+          encodeOriginalDims.value.height > MAX_RESIZE_DIM)
+    );
 
     const messageBytes = computed(() => Stego.utf8ByteLength(message.value));
 
@@ -259,9 +414,7 @@ createApp({
       () => Boolean(encodeImg.value) && encodeImg.value.totalPixels > Stego.WARN_PIXELS
     );
 
-    const showingDegradedCanvas = computed(
-      () => isDegrading.value && !showOriginalPreview.value && hasLivePreview.value
-    );
+    const showingDegradedCanvas = computed(() => isDegrading.value && hasLivePreview.value);
 
     const canEncode = computed(
       () =>
@@ -270,6 +423,7 @@ createApp({
         messageBytes.value > 0 &&
         !isOverCapacity.value &&
         !isEncoding.value &&
+        !isResizingImage.value &&
         !(isEncryptedEncode.value && !cryptoSupported)
     );
 
@@ -278,6 +432,7 @@ createApp({
         Boolean(encodeImg.value) &&
         capacityBudget.value.maxTotalBytes > 0 &&
         !isOverCapacity.value &&
+        !isResizingImage.value &&
         qualityInfo.value.planesUsed < 8
     );
 
@@ -332,7 +487,6 @@ createApp({
       hasLivePreview.value = false;
       livePreviewStale.value = false;
       livePsnrDb.value = null;
-      showOriginalPreview.value = false;
     }
 
     function revokeEncodeUrls() {
@@ -343,8 +497,14 @@ createApp({
     }
 
     function clearEncode() {
+      encodeLoadSeq += 1;
       revokeEncodeUrls();
       resetLivePreview();
+      encodeSourceFile.value = null;
+      encodeOriginalDims.value = null;
+      resizeBeforeEncode.value = false;
+      isResizingImage.value = false;
+      splitPercent.value = 50;
       encodeImg.value = null;
       encodeError.value = '';
       if (encodeFileInput.value) {
@@ -478,6 +638,54 @@ createApp({
       }
     });
 
+    // Redimensionado previo opcional (máx. 1600 px) preservando sourceFile original.
+    watch(resizeBeforeEncode, async (enabled) => {
+      const sourceFile = encodeSourceFile.value;
+      if (!sourceFile || !canResizeEncode.value) return;
+      if (enabled === Boolean(encodeImg.value?.isResized)) return;
+
+      const mySeq = ++encodeLoadSeq;
+      isResizingImage.value = true;
+      encodeError.value = '';
+      clearEncodeResult();
+      resetLivePreview();
+
+      try {
+        const nextLoaded = enabled
+          ? await loadResizedImageFile(sourceFile, MAX_RESIZE_DIM)
+          : {
+              ...(await Stego.loadImageFile(sourceFile)),
+              fileSize: sourceFile.size,
+              isResized: false
+            };
+
+        if (mySeq !== encodeLoadSeq) {
+          if (nextLoaded.previewUrl) {
+            URL.revokeObjectURL(nextLoaded.previewUrl);
+          }
+          return;
+        }
+
+        if (encodeImg.value?.previewUrl) {
+          URL.revokeObjectURL(encodeImg.value.previewUrl);
+        }
+        encodeImg.value = nextLoaded;
+
+        if (nextLoaded.opaquePixels === 0 || nextLoaded.maxTotalBytes === 0) {
+          encodeError.value =
+            'Esta imagen no tiene suficientes píxeles opacos (A = 255) para ocultar un mensaje.';
+        }
+      } catch (err) {
+        if (mySeq === encodeLoadSeq) {
+          encodeError.value = err.message || 'No se pudo aplicar el redimensionado previo.';
+        }
+      } finally {
+        if (mySeq === encodeLoadSeq) {
+          isResizingImage.value = false;
+        }
+      }
+    });
+
     // Estimación con debounce (250 ms) + guardia de secuencia (reqSeq) para compresión deflate-raw.
     watch([message, useCompression], () => {
       clearTimeout(compressionTimer);
@@ -577,6 +785,16 @@ createApp({
       }
     });
 
+    async function loadSampleImage() {
+      encodeError.value = '';
+      try {
+        const sampleFile = await createSampleImageFile();
+        await loadEncodeFile(sampleFile);
+      } catch (err) {
+        encodeError.value = err.message || 'No se pudo crear la imagen de ejemplo.';
+      }
+    }
+
     async function simulateNextPlane() {
       if (!canSimulateNextPlane.value) return;
 
@@ -614,7 +832,6 @@ createApp({
           const filler = chunk.repeat(Math.ceil(needed / chunk.length)).slice(0, needed);
           message.value = message.value + prefix + filler;
         }
-        showOriginalPreview.value = false;
         return;
       }
 
@@ -654,7 +871,10 @@ createApp({
           const c2 = await Stego.compressRaw(utf8Encoder.encode(candidate));
           effectiveLen = Math.min(rawLen, c2.length);
           if (effectiveLen > budget.maxTotalBytes) {
-            candidate = candidate.slice(0, Math.max(baseText.length, candidate.length - Math.ceil((effectiveLen - budget.maxTotalBytes) * 1.3)));
+            candidate = candidate.slice(
+              0,
+              Math.max(baseText.length, candidate.length - Math.ceil((effectiveLen - budget.maxTotalBytes) * 1.3))
+            );
             rawLen = Stego.utf8ByteLength(candidate);
             const c3 = await Stego.compressRaw(utf8Encoder.encode(candidate));
             effectiveLen = Math.min(rawLen, c3.length);
@@ -671,7 +891,6 @@ createApp({
       compressionReqSeq += 1;
       estimatedCompressedBytes.value = effectiveLen;
       isEstimatingCompression.value = false;
-      showOriginalPreview.value = false;
     }
 
     function triggerEncodePicker() {
@@ -725,20 +944,45 @@ createApp({
     async function loadEncodeFile(file) {
       if (!file) return;
 
+      const mySeq = ++encodeLoadSeq;
       revokeEncodeUrls();
       resetLivePreview();
+      encodeSourceFile.value = null;
+      encodeOriginalDims.value = null;
+      resizeBeforeEncode.value = false;
+      isResizingImage.value = false;
+      splitPercent.value = 50;
       encodeImg.value = null;
       encodeError.value = '';
 
       try {
         const loaded = await Stego.loadImageFile(file);
-        encodeImg.value = loaded;
+        if (mySeq !== encodeLoadSeq) {
+          if (loaded.previewUrl) {
+            URL.revokeObjectURL(loaded.previewUrl);
+          }
+          return;
+        }
+
+        encodeSourceFile.value = file;
+        encodeOriginalDims.value = {
+          width: loaded.width,
+          height: loaded.height,
+          fileSize: file.size
+        };
+        encodeImg.value = {
+          ...loaded,
+          fileSize: file.size,
+          isResized: false
+        };
         if (loaded.opaquePixels === 0 || loaded.maxTotalBytes === 0) {
           encodeError.value =
             'Esta imagen no tiene suficientes píxeles opacos (A = 255) para ocultar un mensaje.';
         }
       } catch (err) {
-        encodeError.value = err.message || 'No se pudo cargar la imagen.';
+        if (mySeq === encodeLoadSeq) {
+          encodeError.value = err.message || 'No se pudo cargar la imagen.';
+        }
       }
     }
 
@@ -787,6 +1031,8 @@ createApp({
 
         encodeResult.value = {
           blob,
+          inputSize: encodeImg.value.fileSize ?? 0,
+          outputSize: blob.size,
           downloadUrl,
           downloadName,
           version: encoded.version,
@@ -979,6 +1225,7 @@ createApp({
     }
 
     return {
+      MAX_RESIZE_DIM,
       activeTab,
       cryptoSupported,
       compressionSupported,
@@ -986,6 +1233,10 @@ createApp({
       isDark,
       toggleTheme,
       encodeFileInput,
+      encodeOriginalDims,
+      resizeBeforeEncode,
+      isResizingImage,
+      canResizeEncode,
       encodeImg,
       message,
       encodePassword,
@@ -999,7 +1250,7 @@ createApp({
       isEstimatingCompression,
       livePreviewCanvas,
       livePsnrDb,
-      showOriginalPreview,
+      splitPercent,
       hasLivePreview,
       livePreviewStale,
       isRenderingPreview,
@@ -1035,6 +1286,7 @@ createApp({
       needsDecodePassword,
       clearEncode,
       clearDecode,
+      loadSampleImage,
       renderDegradedPreview,
       simulateNextPlane,
       triggerEncodePicker,
