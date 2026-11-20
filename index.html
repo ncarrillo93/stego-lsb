@@ -15,7 +15,10 @@
     }
 
     .preview-img {
+      max-width: 100%;
       max-height: 240px;
+      width: auto;
+      height: auto;
       object-fit: contain;
     }
 
@@ -97,26 +100,62 @@
             <div class="row g-3 align-items-center">
               <div class="col-md-5 text-center">
                 <img
+                  v-show="!showingDegradedCanvas"
                   :src="encodeImg.previewUrl"
                   :alt="encodeImg.fileName"
                   class="img-fluid rounded border bg-white preview-img"
                 >
+                <canvas
+                  ref="livePreviewCanvas"
+                  v-show="showingDegradedCanvas"
+                  class="img-fluid rounded border bg-white preview-img"
+                  aria-label="Vista previa degradada en vivo"
+                ></canvas>
+
                 <div class="small text-muted text-truncate mt-1" :title="encodeImg.fileName">
                   {{ encodeImg.fileName }}
                 </div>
+
+                <div v-if="isDegrading" class="d-flex flex-column align-items-center gap-1 mt-2">
+                  <div class="d-flex flex-wrap justify-content-center align-items-center gap-1">
+                    <span
+                      v-if="hasLivePreview"
+                      class="badge"
+                      :class="showOriginalPreview ? 'text-bg-secondary' : 'text-bg-warning'"
+                    >
+                      {{ showOriginalPreview ? 'Original' : 'Vista degradada' }}
+                    </span>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-outline-secondary"
+                      :disabled="!hasLivePreview"
+                      @click="showOriginalPreview = !showOriginalPreview"
+                    >
+                      {{ showOriginalPreview ? 'Ver degradada' : 'Ver original' }}
+                    </button>
+                  </div>
+
+                  <button
+                    v-if="isLargeImage"
+                    type="button"
+                    class="btn btn-sm btn-outline-primary"
+                    :disabled="isRenderingPreview"
+                    @click="renderDegradedPreview"
+                  >
+                    {{ isRenderingPreview ? 'Calculando vista previa...' : 'Actualizar vista previa degradada' }}
+                  </button>
+                  <div v-if="isLargeImage && livePreviewStale" class="small text-muted">
+                    Imagen grande (&gt; 8 MP): actualiza la vista previa bajo demanda.
+                  </div>
+                </div>
               </div>
+
               <div class="col-md-7">
                 <div class="row g-2 small">
                   <div class="col-6">
                     <div class="p-2 bg-white border rounded h-100">
                       <div class="text-muted">Resolución</div>
                       <div class="fw-semibold">{{ encodeImg.width }} × {{ encodeImg.height }} px</div>
-                    </div>
-                  </div>
-                  <div class="col-6">
-                    <div class="p-2 bg-white border rounded h-100">
-                      <div class="text-muted">Capacidad máxima</div>
-                      <div class="fw-semibold">{{ formatBytes(encodeImg.maxMessageBytes) }}</div>
                     </div>
                   </div>
                   <div class="col-6">
@@ -129,11 +168,20 @@
                   </div>
                   <div class="col-6">
                     <div class="p-2 bg-white border rounded h-100">
-                      <div class="text-muted">Bits LSB usados</div>
+                      <div class="text-muted">Sin pérdida visual (plano 1/8)</div>
                       <div class="fw-semibold">
-                        {{ formatNumber(usedBitsPreview) }} / {{ formatNumber(encodeImg.usableBits) }}
-                        <span class="text-muted">({{ formatPercent(usagePercent) }})</span>
+                        hasta {{ formatNumber(encodeImg.losslessBytes) }} car. ASCII
                       </div>
+                      <div class="text-muted">({{ formatBytes(encodeImg.losslessBytes) }})</div>
+                    </div>
+                  </div>
+                  <div class="col-6">
+                    <div class="p-2 bg-white border rounded h-100">
+                      <div class="text-muted">Máximo degradando (8 bits/canal)</div>
+                      <div class="fw-semibold">
+                        hasta {{ formatNumber(encodeImg.maxTotalBytes) }} car.
+                      </div>
+                      <div class="text-muted">({{ formatBytes(encodeImg.maxTotalBytes) }})</div>
                     </div>
                   </div>
                 </div>
@@ -142,19 +190,31 @@
           </div>
 
           <div class="mb-3">
-            <div class="d-flex justify-content-between align-items-center mb-1">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-1">
               <label for="secret-msg" class="form-label fw-semibold mb-0">
                 2. Escribe el mensaje secreto (UTF-8)
               </label>
-              <span
-                class="small"
-                :class="isOverCapacity ? 'text-danger fw-semibold' : 'text-muted'"
-              >
-                {{ formatNumber(messageBytes) }} bytes
-                <template v-if="encodeImg">
-                  / {{ formatNumber(encodeImg.maxMessageBytes) }} bytes máx.
-                </template>
-              </span>
+              <div class="d-flex align-items-center flex-wrap gap-2">
+                <span
+                  class="small"
+                  :class="isOverCapacity ? 'text-danger fw-semibold' : 'text-muted'"
+                >
+                  {{ formatNumber(message.length) }} car. ({{ formatNumber(messageBytes) }} B)
+                  <template v-if="encodeImg">
+                    · sin pérdida: {{ formatNumber(encodeImg.losslessBytes) }} B
+                  </template>
+                </span>
+                <span v-if="encodeImg" class="badge" :class="qualityBadgeClass">
+                  {{ qualityBadgeLabel }}
+                </span>
+                <span
+                  v-if="isDegrading && livePsnrDb !== null"
+                  class="badge text-bg-light border"
+                  title="Relación señal a ruido pico (PSNR): menor dB implica mayor degradación visual"
+                >
+                  PSNR: {{ formatPsnr(livePsnrDb) }}
+                </span>
+              </div>
             </div>
 
             <textarea
@@ -165,21 +225,59 @@
               placeholder="Escribe aquí el mensaje que quieres ocultar en la imagen..."
             ></textarea>
 
-            <div v-if="encodeImg" class="progress mt-2" style="height: 8px;">
-              <div
-                class="progress-bar"
-                :class="progressBarClass"
-                role="progressbar"
-                :style="{ width: Math.min(100, usagePercent) + '%' }"
-                :aria-valuenow="Math.round(Math.min(100, usagePercent))"
-                aria-valuemin="0"
-                aria-valuemax="100"
-              ></div>
+            <div v-if="encodeImg" class="mt-2">
+              <div class="progress" style="height: 8px;">
+                <div
+                  class="progress-bar"
+                  :class="progressBarClass"
+                  role="progressbar"
+                  :style="{ width: progressPercent + '%' }"
+                  :aria-valuenow="Math.round(progressPercent)"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                ></div>
+              </div>
+
+              <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-2">
+                <div class="small text-muted">
+                  <template v-if="isOverCapacity">
+                    Excede la capacidad total en los 8 planos ({{ formatBytes(encodeImg.maxTotalBytes) }}).
+                  </template>
+                  <template v-else-if="isDegrading">
+                    Plano {{ qualityInfo.planesUsed }}/8 · {{ formatPercent(qualityInfo.overallPercent) }} de capacidad total · cambio máx. ±{{ qualityInfo.maxChannelDelta }} por canal
+                  </template>
+                  <template v-else-if="messageBytes > 0">
+                    Plano 1/8 sin pérdida · {{ formatPercent(qualityInfo.losslessPercent) }} del límite imperceptible
+                  </template>
+                  <template v-else>
+                    Escribe un mensaje para calcular el uso de planos de bits.
+                  </template>
+                </div>
+
+                <button
+                  v-if="canSimulateNextPlane"
+                  type="button"
+                  class="btn btn-sm btn-outline-secondary"
+                  @click="simulateNextPlane"
+                >
+                  Simular exceso (+1 plano)
+                </button>
+              </div>
             </div>
           </div>
 
+          <div
+            v-if="isDegrading"
+            class="alert py-2 small"
+            :class="qualityInfo.planesUsed >= 5 ? 'alert-danger' : 'alert-warning'"
+            role="status"
+          >
+            <strong>Degradación visual activa (plano {{ qualityInfo.planesUsed }}/8):</strong>
+            el texto supera el límite sin pérdida ({{ formatNumber(encodeImg.losslessBytes) }} B) y ahora ocupa los {{ qualityInfo.planesUsed }} bits menos significativos de cada canal (cambio máx. ±{{ qualityInfo.maxChannelDelta }}). La imagen se degrada de forma real, pero el mensaje sigue siendo <strong>100% decodificable</strong>.
+          </div>
+
           <div v-if="isOverCapacity" class="alert alert-danger py-2 small" role="alert">
-            El mensaje supera la capacidad disponible de la imagen ({{ formatNumber(messageBytes) }} B de {{ formatNumber(encodeImg.maxMessageBytes) }} B). Reduce el texto o elige una imagen más grande.
+            El mensaje supera la capacidad máxima en los 8 planos de bits ({{ formatNumber(messageBytes) }} B de {{ formatNumber(encodeImg.maxTotalBytes) }} B). Reduce el texto o elige una imagen más grande.
           </div>
 
           <div v-if="encodeError" class="alert alert-danger py-2 small" role="alert">
@@ -201,8 +299,9 @@
             <div class="alert alert-success mb-2" role="status">
               <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
                 <div class="small">
-                  <strong>Imagen lista:</strong> se ocultaron {{ formatNumber(encodeResult.messageBytes) }} bytes
-                  ({{ formatNumber(encodeResult.usedBits) }} bits, {{ formatPercent(encodeResult.usagePercent) }} de la capacidad).
+                  <strong>Imagen lista (STG{{ encodeResult.version }}):</strong>
+                  se ocultaron {{ formatNumber(encodeResult.messageBytes) }} bytes
+                  ({{ formatNumber(encodeResult.usedBits) }} bits · plano {{ encodeResult.planesUsed }}/8<template v-if="encodeResult.planesUsed > 1"> · PSNR {{ formatPsnr(encodeResult.psnrDb) }}</template>).
                 </div>
                 <a
                   :href="encodeResult.downloadUrl"
@@ -267,15 +366,28 @@
                     <div class="col-6">
                       <div class="p-2 bg-white border rounded h-100">
                         <div class="text-muted">Mensaje recuperado</div>
-                        <div class="fw-semibold">{{ formatNumber(decoded.messageBytes) }} bytes</div>
+                        <div class="fw-semibold d-flex align-items-center flex-wrap gap-1">
+                          <span>{{ formatNumber(decoded.messageBytes) }} bytes</span>
+                          <span class="badge text-bg-secondary">STG{{ decoded.version }}</span>
+                        </div>
                       </div>
                     </div>
                     <div class="col-6">
                       <div class="p-2 bg-white border rounded h-100">
-                        <div class="text-muted">Bits LSB usados</div>
+                        <div class="text-muted">
+                          {{ decoded.version === 2 ? 'Planos y bits usados' : 'Bits LSB usados' }}
+                        </div>
                         <div class="fw-semibold">
-                          {{ formatNumber(decoded.usedBits) }} / {{ formatNumber(decoded.usableBits) }}
-                          <span class="text-muted">({{ formatPercent(decoded.usagePercent) }})</span>
+                          <template v-if="decoded.version === 2">
+                            {{ decoded.planesUsed }}/8 planos
+                            <div class="text-muted fw-normal">
+                              {{ formatNumber(decoded.usedBits) }} bits ({{ formatPercent(decoded.usagePercent) }})
+                            </div>
+                          </template>
+                          <template v-else>
+                            {{ formatNumber(decoded.usedBits) }} / {{ formatNumber(decoded.baseBits) }}
+                            <span class="text-muted">({{ formatPercent(decoded.usagePercent) }})</span>
+                          </template>
                         </div>
                       </div>
                     </div>
@@ -290,8 +402,14 @@
           </div>
 
           <div v-if="decoded" class="card border-success">
-            <div class="card-header bg-success-subtle d-flex justify-content-between align-items-center">
-              <span class="fw-semibold text-success-emphasis small">Mensaje oculto encontrado</span>
+            <div class="card-header bg-success-subtle d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div class="d-flex align-items-center flex-wrap gap-2">
+                <span class="fw-semibold text-success-emphasis small">Mensaje oculto encontrado</span>
+                <span class="badge text-bg-secondary">STG{{ decoded.version }}</span>
+                <span v-if="decoded.version === 2" class="badge" :class="decoded.quality.badgeClass">
+                  {{ decoded.planesUsed }}/8 planos · {{ decoded.quality.label }}
+                </span>
+              </div>
               <button
                 type="button"
                 class="btn btn-sm"
