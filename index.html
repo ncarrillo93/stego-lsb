@@ -67,38 +67,16 @@
           </div>
           <div class="d-flex align-items-center flex-wrap gap-2">
             <span class="badge text-bg-secondary">Solo PNG sin compresión</span>
-            <div class="btn-group btn-group-sm" role="group" aria-label="Tema de color">
-              <button
-                type="button"
-                class="btn"
-                :class="theme === 'auto' ? 'btn-secondary' : 'btn-outline-secondary'"
-                :aria-pressed="theme === 'auto'"
-                data-theme-value="auto"
-                @click="theme = 'auto'"
-              >
-                Auto
-              </button>
-              <button
-                type="button"
-                class="btn"
-                :class="theme === 'light' ? 'btn-secondary' : 'btn-outline-secondary'"
-                :aria-pressed="theme === 'light'"
-                data-theme-value="light"
-                @click="theme = 'light'"
-              >
-                Claro
-              </button>
-              <button
-                type="button"
-                class="btn"
-                :class="theme === 'dark' ? 'btn-secondary' : 'btn-outline-secondary'"
-                :aria-pressed="theme === 'dark'"
-                data-theme-value="dark"
-                @click="theme = 'dark'"
-              >
-                Oscuro
-              </button>
-            </div>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-secondary"
+              :aria-label="isDark ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'"
+              :title="isDark ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'"
+              :aria-pressed="isDark"
+              @click="toggleTheme"
+            >
+              <span aria-hidden="true">{{ isDark ? '☀️' : '🌙' }}</span>
+            </button>
           </div>
         </div>
 

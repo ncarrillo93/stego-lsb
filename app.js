@@ -13,16 +13,20 @@ import * as Stego from './stego.js';
 
 const THEME_STORAGE_KEY = 'stego-theme';
 
-function readStoredTheme() {
+function readInitialTheme() {
   try {
     const value = localStorage.getItem(THEME_STORAGE_KEY);
-    if (value === 'light' || value === 'dark' || value === 'auto') {
+    if (value === 'light' || value === 'dark') {
       return value;
     }
   } catch {
     // Almacenamiento no disponible o restringido.
   }
-  return 'auto';
+  const prefersDark =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return prefersDark ? 'dark' : 'light';
 }
 
 function extractPastedImageFile(event) {
@@ -53,28 +57,16 @@ createApp({
   setup() {
     const activeTab = ref('encode');
 
-    // Tema visual Bootstrap 5.3 ('auto' | 'light' | 'dark')
-    const theme = ref(readStoredTheme());
-    const darkMediaQuery =
-      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-        ? window.matchMedia('(prefers-color-scheme: dark)')
-        : null;
-
-    function resolveTheme(mode) {
-      if (mode === 'auto') {
-        return darkMediaQuery?.matches ? 'dark' : 'light';
-      }
-      return mode;
-    }
+    // Tema visual Bootstrap 5.3 ('light' | 'dark')
+    const theme = ref(readInitialTheme());
+    const isDark = computed(() => theme.value === 'dark');
 
     function applyTheme(mode) {
-      document.documentElement.setAttribute('data-bs-theme', resolveTheme(mode));
+      document.documentElement.setAttribute('data-bs-theme', mode);
     }
 
-    function onSystemThemeChange() {
-      if (theme.value === 'auto') {
-        applyTheme('auto');
-      }
+    function toggleTheme() {
+      theme.value = isDark.value ? 'light' : 'dark';
     }
 
     applyTheme(theme.value);
@@ -357,12 +349,10 @@ createApp({
 
     onMounted(() => {
       window.addEventListener('paste', onWindowPaste);
-      darkMediaQuery?.addEventListener?.('change', onSystemThemeChange);
     });
 
     onUnmounted(() => {
       window.removeEventListener('paste', onWindowPaste);
-      darkMediaQuery?.removeEventListener?.('change', onSystemThemeChange);
       clearTimeout(previewTimer);
       clearTimeout(copyTimer);
       revokeEncodeUrls();
@@ -638,6 +628,8 @@ createApp({
     return {
       activeTab,
       theme,
+      isDark,
+      toggleTheme,
       encodeFileInput,
       encodeImg,
       message,
