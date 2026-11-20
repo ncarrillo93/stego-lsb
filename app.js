@@ -12,6 +12,8 @@ import {
 import * as Stego from './stego.js';
 
 const THEME_STORAGE_KEY = 'stego-theme';
+const HEADER_OPAQUE_PIXELS_ENCRYPTED = (Stego.HEADER_BYTES_V2_ENCRYPTED * 8) / 3; // 104 px
+const utf8Encoder = new TextEncoder();
 
 function readInitialTheme() {
   try {
@@ -53,9 +55,37 @@ function extractPastedImageFile(event) {
   return null;
 }
 
+// Genera ASCII imprimible de alta entropía (94 símbolos: 0x21..0x7E) para simular exceso aun con deflate-raw.
+function generateHighEntropyAscii(length) {
+  if (length <= 0) return '';
+  const alphabetSize = 94;
+  const out = new Array(length);
+  const rand = new Uint8Array(Math.min(4096, length));
+  let pos = 0;
+
+  while (pos < length) {
+    const chunkLen = Math.min(rand.length, length - pos);
+    const slice = chunkLen === rand.length ? rand : rand.subarray(0, chunkLen);
+    if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+      globalThis.crypto.getRandomValues(slice);
+    } else {
+      for (let i = 0; i < chunkLen; i++) {
+        slice[i] = (Math.random() * 256) | 0;
+      }
+    }
+    for (let i = 0; i < chunkLen; i++) {
+      out[pos++] = String.fromCharCode(33 + (slice[i] % alphabetSize));
+    }
+  }
+
+  return out.join('');
+}
+
 createApp({
   setup() {
     const activeTab = ref('encode');
+    const cryptoSupported = Stego.isCryptoSupported();
+    const compressionSupported = Stego.isCompressionSupported();
 
     // Tema visual Bootstrap 5.3 ('light' | 'dark')
     const theme = ref(readInitialTheme());
@@ -84,11 +114,21 @@ createApp({
     const encodeFileInput = ref(null);
     const encodeImg = shallowRef(null);
     const message = ref('');
+    const encodePassword = ref('');
+    const showEncodePassword = ref(false);
+    const useCompression = ref(compressionSupported);
+    const useScatter = ref(true);
     const encodeError = ref('');
     const encodeResult = shallowRef(null);
     const isEncoding = ref(false);
     const isDraggingEncode = ref(false);
     let encodeDragDepth = 0;
+
+    // Estimación asíncrona con debounce de compresión deflate-raw
+    const estimatedCompressedBytes = ref(null);
+    const isEstimatingCompression = ref(false);
+    let compressionTimer = null;
+    let compressionReqSeq = 0;
 
     // Vista previa en vivo de degradación progresiva (<canvas>)
     const livePreviewCanvas = ref(null);
@@ -103,6 +143,11 @@ createApp({
     // Estado de decodificación ("Leer mensaje")
     const decodeFileInput = ref(null);
     const decodeImg = shallowRef(null);
+    const decodeMeta = shallowRef(null);
+    const decodePassword = ref('');
+    const showDecodePassword = ref(false);
+    const isDecoding = ref(false);
+    const decodeFromPaste = ref(false);
     const decoded = shallowRef(null);
     const decodeError = ref('');
     const isDraggingDecode = ref(false);
@@ -110,24 +155,103 @@ createApp({
     const copied = ref(false);
     let copyTimer = null;
 
+    const isEncryptedEncode = computed(() => encodePassword.value.length > 0);
+    const isScatteredEncode = computed(() => isEncryptedEncode.value && useScatter.value);
+    const isCompressedActive = computed(() => useCompression.value && compressionSupported);
+
     const messageBytes = computed(() => Stego.utf8ByteLength(message.value));
 
-    const usedBitsPreview = computed(() =>
-      messageBytes.value > 0 ? (Stego.getOverheadBytes() + messageBytes.value) * 8 : 0
+    const capacityBudget = computed(() => {
+      const options = {
+        encrypted: isEncryptedEncode.value,
+        scattered: isScatteredEncode.value
+      };
+      if (!encodeImg.value) {
+        return {
+          losslessBytes: 0,
+          maxTotalBytes: 0,
+          overheadBytes: Stego.getOverheadBytes(options)
+        };
+      }
+      return Stego.getCapacityBytes(encodeImg.value, options);
+    });
+
+    const effectivePayloadBytes = computed(() => {
+      if (messageBytes.value === 0) return 0;
+      if (isCompressedActive.value && estimatedCompressedBytes.value !== null) {
+        return estimatedCompressedBytes.value;
+      }
+      return messageBytes.value;
+    });
+
+    const compressionWillSave = computed(
+      () =>
+        isCompressedActive.value &&
+        estimatedCompressedBytes.value !== null &&
+        estimatedCompressedBytes.value < messageBytes.value
     );
 
-    const qualityInfo = computed(() =>
-      Stego.estimateQuality(usedBitsPreview.value, encodeImg.value?.opaquePixels || 0)
-    );
+    const usedBitsPreview = computed(() => {
+      if (effectivePayloadBytes.value <= 0) return 0;
+      return (capacityBudget.value.overheadBytes + effectivePayloadBytes.value) * 8;
+    });
 
-    const isOverCapacity = computed(
-      () => Boolean(encodeImg.value) && messageBytes.value > encodeImg.value.maxTotalBytes
-    );
+    const qualityInfo = computed(() => {
+      const opaque = encodeImg.value?.opaquePixels || 0;
+      if (effectivePayloadBytes.value <= 0 || opaque === 0) {
+        return Stego.estimateQuality(0, opaque);
+      }
+
+      if (isScatteredEncode.value) {
+        const remainingOpaque = Math.max(0, opaque - HEADER_OPAQUE_PIXELS_ENCRYPTED);
+        const bodyBits = (effectivePayloadBytes.value + Stego.GCM_TAG_BYTES) * 8;
+        const bodyBitsPerPlane = remainingOpaque * 3;
+        const base = Stego.estimateQuality(usedBitsPreview.value, opaque);
+
+        if (bodyBitsPerPlane <= 0 || bodyBits <= bodyBitsPerPlane) {
+          return base;
+        }
+
+        const actualPlanes = Math.min(8, Math.ceil(bodyBits / bodyBitsPerPlane));
+        const bitsInActive =
+          bodyBits >= bodyBitsPerPlane * 8
+            ? bodyBitsPerPlane
+            : ((bodyBits - 1) % bodyBitsPerPlane) + 1;
+        const adjusted = Stego.estimateQuality((actualPlanes - 1) * (opaque * 3) + 1, opaque);
+
+        return {
+          ...adjusted,
+          activePlaneFill: (bitsInActive / bodyBitsPerPlane) * 100,
+          overallPercent: base.overallPercent,
+          losslessPercent: base.losslessPercent
+        };
+      }
+
+      return Stego.estimateQuality(usedBitsPreview.value, opaque);
+    });
+
+    const isOverCapacity = computed(() => {
+      if (!encodeImg.value || messageBytes.value === 0) return false;
+      // Mientras corre la estimación con debounce de deflate-raw, evitar falsos bloqueos por tamaño crudo.
+      if (
+        isCompressedActive.value &&
+        isEstimatingCompression.value &&
+        messageBytes.value > capacityBudget.value.maxTotalBytes
+      ) {
+        return false;
+      }
+      return effectivePayloadBytes.value > capacityBudget.value.maxTotalBytes;
+    });
 
     const isDegrading = computed(
       () =>
         Boolean(encodeImg.value) &&
         !isOverCapacity.value &&
+        !(
+          isCompressedActive.value &&
+          isEstimatingCompression.value &&
+          messageBytes.value > capacityBudget.value.losslessBytes
+        ) &&
         qualityInfo.value.planesUsed > 1
     );
 
@@ -142,16 +266,17 @@ createApp({
     const canEncode = computed(
       () =>
         Boolean(encodeImg.value) &&
-        encodeImg.value.maxTotalBytes > 0 &&
+        capacityBudget.value.maxTotalBytes > 0 &&
         messageBytes.value > 0 &&
         !isOverCapacity.value &&
-        !isEncoding.value
+        !isEncoding.value &&
+        !(isEncryptedEncode.value && !cryptoSupported)
     );
 
     const canSimulateNextPlane = computed(
       () =>
         Boolean(encodeImg.value) &&
-        encodeImg.value.maxTotalBytes > 0 &&
+        capacityBudget.value.maxTotalBytes > 0 &&
         !isOverCapacity.value &&
         qualityInfo.value.planesUsed < 8
     );
@@ -187,6 +312,10 @@ createApp({
 
     const qualityBadgeLabel = computed(() =>
       isOverCapacity.value ? 'Supera el máximo (8 planos)' : qualityInfo.value.label
+    );
+
+    const needsDecodePassword = computed(
+      () => Boolean(decodeMeta.value?.encrypted) && !decoded.value
     );
 
     function clearEncodeResult() {
@@ -230,6 +359,11 @@ createApp({
       clearTimeout(copyTimer);
       copyTimer = null;
       decodeImg.value = null;
+      decodeMeta.value = null;
+      decodePassword.value = '';
+      showDecodePassword.value = false;
+      isDecoding.value = false;
+      decodeFromPaste.value = false;
       decoded.value = null;
       decodeError.value = '';
       copied.value = false;
@@ -258,8 +392,38 @@ createApp({
       ctx.putImageData(new ImageData(frame.data, frame.width, frame.height), 0, 0);
     }
 
+    function buildPreviewMessageForFastRender() {
+      // Sin cifrado ni ahorro de compresión, renderizamos el mensaje exacto solo si cabe en encodeImageData.
+      if (
+        !isEncryptedEncode.value &&
+        !compressionWillSave.value &&
+        messageBytes.value <= encodeImg.value.maxTotalBytes
+      ) {
+        return message.value;
+      }
+
+      // Con contraseña o compresión, estimamos la degradación sin ejecutar PBKDF2 en cada tecla.
+      const extraOverhead =
+        capacityBudget.value.overheadBytes - Stego.getOverheadBytes({ encrypted: false });
+      const targetLen = Math.min(
+        encodeImg.value.maxTotalBytes,
+        Math.max(1, effectivePayloadBytes.value + Math.max(0, extraOverhead))
+      );
+      const seed =
+        'Stego LSB preview estimado [0123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ/abcdefghijklmnopqrstuvwxyz]. ';
+      return seed.repeat(Math.ceil(targetLen / seed.length)).slice(0, targetLen);
+    }
+
     async function renderDegradedPreview() {
-      if (!encodeImg.value || !isDegrading.value) {
+      if (isEstimatingCompression.value) {
+        return;
+      }
+
+      if (
+        !encodeImg.value ||
+        !isDegrading.value ||
+        effectivePayloadBytes.value > capacityBudget.value.maxTotalBytes
+      ) {
         resetLivePreview();
         return;
       }
@@ -271,12 +435,20 @@ createApp({
           await waitForPaint();
         }
 
-        if (!encodeImg.value || !isDegrading.value) {
-          resetLivePreview();
+        if (
+          isEstimatingCompression.value ||
+          !encodeImg.value ||
+          !isDegrading.value ||
+          effectivePayloadBytes.value > capacityBudget.value.maxTotalBytes
+        ) {
+          if (!isEstimatingCompression.value) {
+            resetLivePreview();
+          }
           return;
         }
 
-        const encoded = Stego.encodeImageData(encodeImg.value.imageData, message.value, {
+        const previewMessage = buildPreviewMessageForFastRender();
+        const encoded = Stego.encodeImageData(encodeImg.value.imageData, previewMessage, {
           stats: encodeImg.value
         });
         livePsnrDb.value = Stego.computePsnr(encodeImg.value.imageData.data, encoded.data);
@@ -297,30 +469,73 @@ createApp({
       }
     }
 
-    watch(message, () => {
+    watch([message, encodePassword, useCompression, useScatter], () => {
       if (encodeResult.value) {
         clearEncodeResult();
       }
+      if (encodeError.value && encodeImg.value?.maxTotalBytes > 0) {
+        encodeError.value = '';
+      }
     });
 
-    watch([message, encodeImg], () => {
-      clearTimeout(previewTimer);
-      previewTimer = null;
+    // Estimación con debounce (250 ms) + guardia de secuencia (reqSeq) para compresión deflate-raw.
+    watch([message, useCompression], () => {
+      clearTimeout(compressionTimer);
+      compressionTimer = null;
+      compressionReqSeq += 1;
 
-      if (!isDegrading.value) {
-        resetLivePreview();
+      if (!isCompressedActive.value || messageBytes.value === 0) {
+        estimatedCompressedBytes.value = null;
+        isEstimatingCompression.value = false;
         return;
       }
 
-      if (isLargeImage.value) {
-        livePreviewStale.value = true;
-        return;
-      }
+      const mySeq = compressionReqSeq;
+      const currentText = message.value;
+      const rawLen = messageBytes.value;
+      isEstimatingCompression.value = true;
 
-      previewTimer = setTimeout(() => {
-        renderDegradedPreview();
-      }, 180);
+      compressionTimer = setTimeout(async () => {
+        try {
+          const compressed = await Stego.compressRaw(utf8Encoder.encode(currentText));
+          if (mySeq !== compressionReqSeq) return;
+          estimatedCompressedBytes.value = Math.min(rawLen, compressed.length);
+        } catch {
+          if (mySeq !== compressionReqSeq) return;
+          estimatedCompressedBytes.value = rawLen;
+        } finally {
+          if (mySeq === compressionReqSeq) {
+            isEstimatingCompression.value = false;
+          }
+        }
+      }, 250);
     });
+
+    watch(
+      [effectivePayloadBytes, encodeImg, isEncryptedEncode, isScatteredEncode, isEstimatingCompression],
+      () => {
+        clearTimeout(previewTimer);
+        previewTimer = null;
+
+        if (isEstimatingCompression.value) {
+          return;
+        }
+
+        if (!isDegrading.value || effectivePayloadBytes.value > capacityBudget.value.maxTotalBytes) {
+          resetLivePreview();
+          return;
+        }
+
+        if (isLargeImage.value) {
+          livePreviewStale.value = true;
+          return;
+        }
+
+        previewTimer = setTimeout(() => {
+          renderDegradedPreview();
+        }, 180);
+      }
+    );
 
     // Al volver a la pestaña "Ocultar mensaje", el <canvas> se remonta y necesita repintado.
     watch(activeTab, async (tab) => {
@@ -353,6 +568,7 @@ createApp({
 
     onUnmounted(() => {
       window.removeEventListener('paste', onWindowPaste);
+      clearTimeout(compressionTimer);
       clearTimeout(previewTimer);
       clearTimeout(copyTimer);
       revokeEncodeUrls();
@@ -361,32 +577,100 @@ createApp({
       }
     });
 
-    function simulateNextPlane() {
+    async function simulateNextPlane() {
       if (!canSimulateNextPlane.value) return;
 
       const currentPlanes = qualityInfo.value.planesUsed;
       const targetPlane = Math.max(2, currentPlanes + 1);
-      const overhead = Stego.getOverheadBytes();
-      const targetBytes = Math.min(
-        encodeImg.value.maxTotalBytes,
-        Math.max(1, Math.floor((targetPlane * encodeImg.value.losslessBits) / 8) - overhead)
-      );
+      const budget = capacityBudget.value;
+      const opaque = encodeImg.value.opaquePixels;
 
-      const currentBytes = messageBytes.value;
-      if (currentBytes >= targetBytes) return;
+      let targetStoredPlainBytes;
+      if (isScatteredEncode.value) {
+        const remainingOpaque = Math.max(0, opaque - HEADER_OPAQUE_PIXELS_ENCRYPTED);
+        targetStoredPlainBytes = Math.min(
+          budget.maxTotalBytes,
+          Math.max(1, Math.floor((targetPlane * remainingOpaque * 3) / 8) - Stego.GCM_TAG_BYTES)
+        );
+      } else {
+        targetStoredPlainBytes = Math.min(
+          budget.maxTotalBytes,
+          Math.max(1, Math.floor((targetPlane * encodeImg.value.losslessBits) / 8) - budget.overheadBytes)
+        );
+      }
 
-      const chunk =
-        'Stego LSB: prueba de degradacion progresiva en planos de bits [0123456789/AaBbCc]. ';
-      const prefix = message.value.length > 0 && !message.value.endsWith('\n') ? '\n' : '';
-      const needed = targetBytes - currentBytes - prefix.length;
+      if (!isCompressedActive.value) {
+        const currentBytes = messageBytes.value;
+        if (currentBytes >= targetStoredPlainBytes) return;
 
-      if (needed <= 0) {
-        message.value = message.value + 'x'.repeat(targetBytes - currentBytes);
+        const chunk =
+          'Stego LSB: prueba de degradacion progresiva en planos de bits [0123456789/AaBbCc]. ';
+        const prefix = message.value.length > 0 && !message.value.endsWith('\n') ? '\n' : '';
+        const needed = targetStoredPlainBytes - currentBytes - prefix.length;
+
+        if (needed <= 0) {
+          message.value = message.value + 'x'.repeat(targetStoredPlainBytes - currentBytes);
+        } else {
+          const filler = chunk.repeat(Math.ceil(needed / chunk.length)).slice(0, needed);
+          message.value = message.value + prefix + filler;
+        }
+        showOriginalPreview.value = false;
         return;
       }
 
-      const filler = chunk.repeat(Math.ceil(needed / chunk.length)).slice(0, needed);
-      message.value = message.value + prefix + filler;
+      // Con deflate-raw activo, usamos ASCII de alta entropía calibrado para alcanzar el plano objetivo.
+      const baseText = message.value;
+      const prefix = baseText.length > 0 && !baseText.endsWith('\n') ? '\n' : '';
+      const currentEffective = effectivePayloadBytes.value;
+      if (currentEffective >= targetStoredPlainBytes) return;
+
+      const deltaNeeded = Math.max(16, targetStoredPlainBytes - currentEffective);
+      let extraLen = Math.min(
+        Stego.MAX_DECOMPRESSED_BYTES - messageBytes.value - prefix.length,
+        Math.ceil(deltaNeeded * 1.24)
+      );
+      if (extraLen <= 0) return;
+
+      let candidate = baseText + prefix + generateHighEntropyAscii(extraLen);
+      let rawLen = Stego.utf8ByteLength(candidate);
+      let effectiveLen = rawLen;
+
+      try {
+        const c1 = await Stego.compressRaw(utf8Encoder.encode(candidate));
+        effectiveLen = Math.min(rawLen, c1.length);
+
+        if (effectiveLen > budget.maxTotalBytes) {
+          const ratio = (budget.maxTotalBytes / effectiveLen) * 0.96;
+          extraLen = Math.max(1, Math.floor(extraLen * ratio));
+          candidate = baseText + prefix + generateHighEntropyAscii(extraLen);
+          rawLen = Stego.utf8ByteLength(candidate);
+          const c2 = await Stego.compressRaw(utf8Encoder.encode(candidate));
+          effectiveLen = Math.min(rawLen, c2.length);
+        } else if (effectiveLen < targetStoredPlainBytes && targetStoredPlainBytes < budget.maxTotalBytes) {
+          const missing = targetStoredPlainBytes - effectiveLen;
+          const topUp = Math.ceil(missing * 1.2);
+          candidate = candidate + generateHighEntropyAscii(topUp);
+          rawLen = Stego.utf8ByteLength(candidate);
+          const c2 = await Stego.compressRaw(utf8Encoder.encode(candidate));
+          effectiveLen = Math.min(rawLen, c2.length);
+          if (effectiveLen > budget.maxTotalBytes) {
+            candidate = candidate.slice(0, Math.max(baseText.length, candidate.length - Math.ceil((effectiveLen - budget.maxTotalBytes) * 1.3)));
+            rawLen = Stego.utf8ByteLength(candidate);
+            const c3 = await Stego.compressRaw(utf8Encoder.encode(candidate));
+            effectiveLen = Math.min(rawLen, c3.length);
+          }
+        }
+      } catch {
+        // Fallback seguro sin compresión estimada.
+      }
+
+      message.value = candidate;
+      await nextTick();
+      clearTimeout(compressionTimer);
+      compressionTimer = null;
+      compressionReqSeq += 1;
+      estimatedCompressedBytes.value = effectiveLen;
+      isEstimatingCompression.value = false;
       showOriginalPreview.value = false;
     }
 
@@ -475,7 +759,10 @@ createApp({
         await nextTick();
         await waitForPaint();
 
-        const encoded = Stego.encodeImageData(encodeImg.value.imageData, message.value, {
+        const encoded = await Stego.encodePayload(encodeImg.value.imageData, message.value, {
+          password: encodePassword.value,
+          compress: useCompression.value,
+          scatter: useScatter.value,
           stats: encodeImg.value
         });
         const psnrDb =
@@ -503,6 +790,12 @@ createApp({
           downloadUrl,
           downloadName,
           version: encoded.version,
+          encrypted: encoded.encrypted,
+          compressed: encoded.compressed,
+          scattered: encoded.scattered,
+          originalBytes: encoded.originalBytes,
+          compressedBytes: encoded.compressedBytes,
+          storedBytes: encoded.storedBytes,
           messageBytes: encoded.messageBytes,
           usedBits: encoded.usedBits,
           planesUsed: encoded.planesUsed,
@@ -535,6 +828,50 @@ createApp({
       await loadDecodeFile(file, { fromPaste: false });
     }
 
+    async function runDecodePayload(password) {
+      if (!decodeImg.value) return;
+
+      isDecoding.value = true;
+      decodeError.value = '';
+
+      try {
+        await nextTick();
+        await waitForPaint();
+
+        const result = await Stego.decodePayload(decodeImg.value.imageData, {
+          password,
+          stats: decodeImg.value
+        });
+        const baseBits = result.planesUsed > 1 ? result.maxTotalBits : result.losslessBits;
+        decoded.value = {
+          ...result,
+          baseBits,
+          usagePercent: baseBits > 0 ? (result.usedBits / baseBits) * 100 : 0
+        };
+      } catch (err) {
+        if (err?.code === 'WRONG_PASSWORD') {
+          decodeError.value =
+            'Contraseña incorrecta o la imagen fue alterada/recomprimida. Verifica la clave e intenta nuevamente.';
+        } else {
+          const baseMessage = err.message || 'No se pudo leer el mensaje de la imagen.';
+          decodeError.value = decodeFromPaste.value
+            ? `${baseMessage} Nota: pegar una imagen desde el portapapeles suele recodificar los píxeles y alterar los bits LSB; prefiere arrastrar o seleccionar el archivo .png original.`
+            : baseMessage;
+        }
+      } finally {
+        isDecoding.value = false;
+      }
+    }
+
+    async function handleDecrypt() {
+      if (!decodeImg.value || !decodeMeta.value?.encrypted || isDecoding.value) return;
+      if (!decodePassword.value) {
+        decodeError.value = 'Ingresa la contraseña para descifrar el mensaje.';
+        return;
+      }
+      await runDecodePayload(decodePassword.value);
+    }
+
     async function loadDecodeFile(file, { fromPaste = false } = {}) {
       if (!file) return;
 
@@ -544,6 +881,11 @@ createApp({
       clearTimeout(copyTimer);
       copyTimer = null;
       decodeImg.value = null;
+      decodeMeta.value = null;
+      decodePassword.value = '';
+      showDecodePassword.value = false;
+      isDecoding.value = false;
+      decodeFromPaste.value = fromPaste;
       decoded.value = null;
       decodeError.value = '';
       copied.value = false;
@@ -552,13 +894,24 @@ createApp({
         const loaded = await Stego.loadImageFile(file);
         decodeImg.value = loaded;
 
-        const result = Stego.decodeImageData(loaded.imageData, loaded);
-        const baseBits = result.planesUsed > 1 ? result.maxTotalBits : result.losslessBits;
-        decoded.value = {
-          ...result,
-          baseBits,
-          usagePercent: baseBits > 0 ? (result.usedBits / baseBits) * 100 : 0
-        };
+        const meta = Stego.inspectImageData(loaded.imageData, loaded);
+        if (!meta.found) {
+          throw new Error(
+            'No se encontró ningún mensaje oculto en esta imagen. Verifica que sea el PNG original sin compresión.'
+          );
+        }
+
+        decodeMeta.value = meta;
+
+        if (meta.encrypted) {
+          if (!cryptoSupported) {
+            decodeError.value =
+              'Esta imagen contiene un mensaje cifrado con AES-256-GCM, pero tu navegador no habilita Web Crypto API en este contexto. Ábrelo desde HTTPS (GitHub Pages) o localhost.';
+          }
+          return;
+        }
+
+        await runDecodePayload('');
       } catch (err) {
         const baseMessage = err.message || 'No se pudo leer el mensaje de la imagen.';
         decodeError.value = fromPaste
@@ -627,16 +980,23 @@ createApp({
 
     return {
       activeTab,
+      cryptoSupported,
+      compressionSupported,
       theme,
       isDark,
       toggleTheme,
       encodeFileInput,
       encodeImg,
       message,
+      encodePassword,
+      showEncodePassword,
+      useCompression,
+      useScatter,
       encodeError,
       encodeResult,
       isEncoding,
       isDraggingEncode,
+      isEstimatingCompression,
       livePreviewCanvas,
       livePsnrDb,
       showOriginalPreview,
@@ -645,11 +1005,21 @@ createApp({
       isRenderingPreview,
       decodeFileInput,
       decodeImg,
+      decodeMeta,
+      decodePassword,
+      showDecodePassword,
+      isDecoding,
       decoded,
       decodeError,
       isDraggingDecode,
       copied,
+      isEncryptedEncode,
+      isScatteredEncode,
+      isCompressedActive,
       messageBytes,
+      capacityBudget,
+      effectivePayloadBytes,
+      compressionWillSave,
       usedBitsPreview,
       qualityInfo,
       isOverCapacity,
@@ -662,6 +1032,7 @@ createApp({
       progressBarClass,
       qualityBadgeClass,
       qualityBadgeLabel,
+      needsDecodePassword,
       clearEncode,
       clearDecode,
       renderDegradedPreview,
@@ -678,6 +1049,7 @@ createApp({
       onSelectEncodeFile,
       handleEncode,
       verifyEncodedInDecode,
+      handleDecrypt,
       loadDecodeFile,
       onSelectDecodeFile,
       copyMessage,

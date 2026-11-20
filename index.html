@@ -45,6 +45,10 @@
       border-color: var(--bs-primary);
       background-color: var(--bs-primary-bg-subtle);
     }
+
+    .options-summary {
+      cursor: pointer;
+    }
   </style>
 </head>
 <body class="bg-body-tertiary">
@@ -202,6 +206,10 @@
                     </button>
                   </div>
 
+                  <div v-if="isEncryptedEncode" class="small text-muted">
+                    Vista previa estimada (sin PBKDF2 en vivo): el PNG descargado lleva cifrado AES-GCM{{ isScatteredEncode ? ' + dispersión Feistel' : '' }} real.
+                  </div>
+
                   <button
                     v-if="isLargeImage"
                     type="button"
@@ -237,18 +245,18 @@
                     <div class="p-2 bg-body border rounded h-100">
                       <div class="text-muted">Sin pérdida visual (plano 1/8)</div>
                       <div class="fw-semibold">
-                        hasta {{ formatNumber(encodeImg.losslessBytes) }} car. ASCII
+                        hasta {{ formatNumber(capacityBudget.losslessBytes) }} car. ASCII
                       </div>
-                      <div class="text-muted">({{ formatBytes(encodeImg.losslessBytes) }})</div>
+                      <div class="text-muted">({{ formatBytes(capacityBudget.losslessBytes) }})</div>
                     </div>
                   </div>
                   <div class="col-6">
                     <div class="p-2 bg-body border rounded h-100">
                       <div class="text-muted">Máximo degradando (8 bits/canal)</div>
                       <div class="fw-semibold">
-                        hasta {{ formatNumber(encodeImg.maxTotalBytes) }} car.
+                        hasta {{ formatNumber(capacityBudget.maxTotalBytes) }} car.
                       </div>
-                      <div class="text-muted">({{ formatBytes(encodeImg.maxTotalBytes) }})</div>
+                      <div class="text-muted">({{ formatBytes(capacityBudget.maxTotalBytes) }})</div>
                     </div>
                   </div>
                 </div>
@@ -271,10 +279,13 @@
                   class="small"
                   :class="isOverCapacity ? 'text-danger fw-semibold' : 'text-muted'"
                 >
-                  {{ formatNumber(message.length) }} car. ({{ formatNumber(messageBytes) }} B)
+                  {{ formatNumber(message.length) }} car. ({{ formatNumber(messageBytes) }} B<template v-if="compressionWillSave"> → {{ formatNumber(effectivePayloadBytes) }} B comp.</template>)
                   <template v-if="encodeImg">
-                    · sin pérdida: {{ formatNumber(encodeImg.losslessBytes) }} B
+                    · sin pérdida: {{ formatNumber(capacityBudget.losslessBytes) }} B
                   </template>
+                </span>
+                <span v-if="isEstimatingCompression" class="badge bg-body-secondary text-body border">
+                  Estimando compresión...
                 </span>
                 <span v-if="encodeImg" class="badge" :class="qualityBadgeClass">
                   {{ qualityBadgeLabel }}
@@ -313,7 +324,7 @@
               <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-2">
                 <div class="small text-muted">
                   <template v-if="isOverCapacity">
-                    Excede la capacidad total en los 8 planos ({{ formatBytes(encodeImg.maxTotalBytes) }}).
+                    Excede la capacidad total en los 8 planos ({{ formatBytes(capacityBudget.maxTotalBytes) }}).
                   </template>
                   <template v-else-if="isDegrading">
                     Plano {{ qualityInfo.planesUsed }}/8 · {{ formatPercent(qualityInfo.overallPercent) }} de capacidad total · cambio máx. ±{{ qualityInfo.maxChannelDelta }} por canal
@@ -338,6 +349,84 @@
             </div>
           </div>
 
+          <details id="advanced-options" class="border rounded p-3 bg-body-tertiary mb-3">
+            <summary class="fw-semibold small options-summary">
+              Opciones avanzadas (cifrado y compresión)
+              <span v-if="isEncryptedEncode" class="badge text-bg-primary ms-2">AES-256-GCM</span>
+              <span v-if="isCompressedActive" class="badge text-bg-info ms-1">deflate-raw</span>
+              <span v-if="isScatteredEncode" class="badge text-bg-secondary ms-1">Feistel</span>
+            </summary>
+
+            <div class="mt-3">
+              <div class="mb-3">
+                <label for="encode-password" class="form-label small fw-semibold mb-1">
+                  Contraseña opcional (AES-256-GCM + PBKDF2-SHA256)
+                </label>
+                <div class="input-group input-group-sm">
+                  <input
+                    id="encode-password"
+                    v-model="encodePassword"
+                    :type="showEncodePassword ? 'text' : 'password'"
+                    class="form-control"
+                    autocomplete="new-password"
+                    :disabled="!cryptoSupported"
+                    placeholder="Déjalo vacío para guardar sin cifrar..."
+                  >
+                  <button
+                    type="button"
+                    class="btn btn-outline-secondary"
+                    :disabled="!cryptoSupported"
+                    :aria-label="showEncodePassword ? 'Ocultar contraseña' : 'Mostrar contraseña'"
+                    @click="showEncodePassword = !showEncodePassword"
+                  >
+                    {{ showEncodePassword ? 'Ocultar' : 'Mostrar' }}
+                  </button>
+                </div>
+                <div v-if="!cryptoSupported" class="form-text text-warning-emphasis">
+                  Web Crypto API no está disponible en este contexto. Ábrelo desde HTTPS (GitHub Pages) o localhost para cifrar mensajes.
+                </div>
+                <div v-else class="form-text">
+                  Cifra el mensaje localmente con AES-256-GCM (600.000 iteraciones PBKDF2) y autentica la cabecera STG2 (+42 B de overhead).
+                </div>
+              </div>
+
+              <div class="form-check form-switch mb-2">
+                <input
+                  id="encode-compress"
+                  v-model="useCompression"
+                  class="form-check-input"
+                  type="checkbox"
+                  :disabled="!compressionSupported"
+                >
+                <label class="form-check-label small" for="encode-compress">
+                  Comprimir texto (<code>deflate-raw</code>)
+                </label>
+                <div v-if="!compressionSupported" class="form-text">
+                  Tu navegador no soporta <code>CompressionStream('deflate-raw')</code>.
+                </div>
+                <div v-else class="form-text">
+                  Multiplica la capacidad en texto repetitivo y se omite automáticamente si no ahorra bytes.
+                </div>
+              </div>
+
+              <div class="form-check form-switch mb-0">
+                <input
+                  id="encode-scatter"
+                  v-model="useScatter"
+                  class="form-check-input"
+                  type="checkbox"
+                  :disabled="!isEncryptedEncode || !cryptoSupported"
+                >
+                <label class="form-check-label small" for="encode-scatter">
+                  Dispersar píxeles con clave (Feistel)
+                </label>
+                <div class="form-text">
+                  Distribuye los bits cifrados por toda el área opaca con una permutación Feistel derivada de la contraseña.
+                </div>
+              </div>
+            </div>
+          </details>
+
           <div
             v-if="isDegrading"
             class="alert py-2 small"
@@ -345,11 +434,11 @@
             role="status"
           >
             <strong>Degradación visual activa (plano {{ qualityInfo.planesUsed }}/8):</strong>
-            el texto supera el límite sin pérdida ({{ formatNumber(encodeImg.losslessBytes) }} B) y ahora ocupa los {{ qualityInfo.planesUsed }} bits menos significativos de cada canal (cambio máx. ±{{ qualityInfo.maxChannelDelta }}). La imagen se degrada de forma real, pero el mensaje sigue siendo <strong>100% decodificable</strong>.
+            el payload supera el límite sin pérdida ({{ formatNumber(capacityBudget.losslessBytes) }} B) y ahora ocupa los {{ qualityInfo.planesUsed }} bits menos significativos de cada canal (cambio máx. ±{{ qualityInfo.maxChannelDelta }}). La imagen se degrada de forma real, pero el mensaje sigue siendo <strong>100% decodificable</strong>.
           </div>
 
           <div v-if="isOverCapacity" class="alert alert-danger py-2 small" role="alert">
-            El mensaje supera la capacidad máxima en los 8 planos de bits ({{ formatNumber(messageBytes) }} B de {{ formatNumber(encodeImg.maxTotalBytes) }} B). Reduce el texto o elige una imagen más grande.
+            El mensaje supera la capacidad máxima en los 8 planos de bits ({{ formatNumber(effectivePayloadBytes) }} B de {{ formatNumber(capacityBudget.maxTotalBytes) }} B). Reduce el texto o elige una imagen más grande.
           </div>
 
           <div v-if="encodeError" class="alert alert-danger py-2 small" role="alert">
@@ -363,7 +452,7 @@
               :disabled="!canEncode"
               @click="handleEncode"
             >
-              {{ isEncoding ? 'Codificando PNG...' : 'Codificar y descargar PNG' }}
+              {{ isEncoding ? (isEncryptedEncode ? 'Cifrando y codificando PNG...' : 'Codificando PNG...') : 'Codificar y descargar PNG' }}
             </button>
           </div>
 
@@ -371,9 +460,21 @@
             <div class="alert alert-success mb-2" role="status">
               <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
                 <div class="small">
-                  <strong>Imagen lista (STG{{ encodeResult.version }}):</strong>
-                  se ocultaron {{ formatNumber(encodeResult.messageBytes) }} bytes
-                  ({{ formatNumber(encodeResult.usedBits) }} bits · plano {{ encodeResult.planesUsed }}/8<template v-if="encodeResult.planesUsed > 1"> · PSNR {{ formatPsnr(encodeResult.psnrDb) }}</template>).
+                  <div>
+                    <strong>Imagen lista (STG{{ encodeResult.version }}):</strong>
+                    se ocultaron {{ formatNumber(encodeResult.messageBytes) }} bytes
+                    ({{ formatNumber(encodeResult.usedBits) }} bits · plano {{ encodeResult.planesUsed }}/8<template v-if="encodeResult.planesUsed > 1"> · PSNR {{ formatPsnr(encodeResult.psnrDb) }}</template>).
+                  </div>
+                  <div
+                    v-if="encodeResult.encrypted || encodeResult.compressed || encodeResult.scattered"
+                    class="d-flex flex-wrap gap-1 mt-1"
+                  >
+                    <span v-if="encodeResult.encrypted" class="badge text-bg-primary">AES-256-GCM</span>
+                    <span v-if="encodeResult.compressed" class="badge text-bg-info">
+                      Comprimido {{ formatNumber(encodeResult.originalBytes) }} B → {{ formatNumber(encodeResult.compressedBytes) }} B
+                    </span>
+                    <span v-if="encodeResult.scattered" class="badge text-bg-secondary">Feistel</span>
+                  </div>
                 </div>
                 <div class="d-flex flex-wrap gap-2">
                   <button
@@ -518,15 +619,71 @@
             </div>
           </div>
 
+          <div v-if="needsDecodePassword" class="card border-primary mb-3">
+            <div class="card-header bg-primary-subtle d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <span class="fw-semibold text-primary-emphasis small">Mensaje cifrado detectado</span>
+              <div class="d-flex flex-wrap gap-1">
+                <span class="badge text-bg-secondary">STG{{ decodeMeta.version }}</span>
+                <span class="badge text-bg-primary">AES-256-GCM</span>
+                <span v-if="decodeMeta.compressed" class="badge text-bg-info">Comprimido</span>
+                <span v-if="decodeMeta.scattered" class="badge text-bg-secondary">Feistel</span>
+                <span class="badge" :class="decodeMeta.quality.badgeClass">
+                  {{ decodeMeta.planesUsed }}/8 planos
+                </span>
+              </div>
+            </div>
+            <div class="card-body">
+              <form @submit.prevent="handleDecrypt">
+                <label for="decode-password" class="form-label small fw-semibold">
+                  Ingresa la contraseña para descifrar (PBKDF2 {{ formatNumber(decodeMeta.kdfIterations) }} iter.)
+                </label>
+                <div class="input-group mb-2">
+                  <input
+                    id="decode-password"
+                    v-model="decodePassword"
+                    :type="showDecodePassword ? 'text' : 'password'"
+                    class="form-control"
+                    autocomplete="current-password"
+                    :disabled="!cryptoSupported || isDecoding"
+                    placeholder="Contraseña del mensaje..."
+                  >
+                  <button
+                    type="button"
+                    class="btn btn-outline-secondary"
+                    :disabled="!cryptoSupported || isDecoding"
+                    :aria-label="showDecodePassword ? 'Ocultar contraseña' : 'Mostrar contraseña'"
+                    @click="showDecodePassword = !showDecodePassword"
+                  >
+                    {{ showDecodePassword ? 'Ocultar' : 'Mostrar' }}
+                  </button>
+                </div>
+                <div class="d-grid">
+                  <button
+                    type="submit"
+                    class="btn btn-primary"
+                    :disabled="!cryptoSupported || isDecoding"
+                  >
+                    {{ isDecoding ? 'Descifrando mensaje...' : 'Descifrar mensaje' }}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <div v-if="decodeError" class="alert alert-danger py-2 small" role="alert">
             {{ decodeError }}
           </div>
 
           <div v-if="decoded" class="card border-success">
             <div class="card-header bg-success-subtle d-flex justify-content-between align-items-center flex-wrap gap-2">
-              <div class="d-flex align-items-center flex-wrap gap-2">
-                <span class="fw-semibold text-success-emphasis small">Mensaje oculto encontrado</span>
+              <div class="d-flex align-items-center flex-wrap gap-1">
+                <span class="fw-semibold text-success-emphasis small me-1">Mensaje oculto encontrado</span>
                 <span class="badge text-bg-secondary">STG{{ decoded.version }}</span>
+                <span v-if="decoded.encrypted" class="badge text-bg-primary">AES-256-GCM</span>
+                <span v-if="decoded.compressed" class="badge text-bg-info">
+                  Comprimido {{ formatNumber(decoded.originalBytes) }} B → {{ formatNumber(decoded.compressedBytes) }} B
+                </span>
+                <span v-if="decoded.scattered" class="badge text-bg-secondary">Feistel</span>
                 <span v-if="decoded.version === 2" class="badge" :class="decoded.quality.badgeClass">
                   {{ decoded.planesUsed }}/8 planos · {{ decoded.quality.label }}
                 </span>
