@@ -102,6 +102,22 @@
     .options-summary {
       cursor: pointer;
     }
+
+    .inspector-canvas {
+      max-width: 100%;
+      max-height: 360px;
+      width: auto;
+      height: auto;
+      image-rendering: pixelated;
+    }
+
+    .legend-dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      vertical-align: middle;
+    }
   </style>
 </head>
 <body class="bg-body-tertiary">
@@ -606,6 +622,125 @@
               </div>
             </div>
 
+            <details
+              id="encode-inspector"
+              class="border rounded p-3 bg-body-tertiary mb-2"
+              :open="encodeInspectorOpen"
+              @toggle="onEncodeInspectorToggle"
+            >
+              <summary class="fw-semibold small options-summary">
+                Inspector visual de bits (Rayos X)
+              </summary>
+
+              <div v-if="encodeInspectorOpen" class="mt-3">
+                <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                  <div class="btn-group btn-group-sm" role="group" aria-label="Modo del inspector">
+                    <button
+                      type="button"
+                      class="btn"
+                      :class="encodeInspectorMode === 'diff' ? 'btn-primary' : 'btn-outline-secondary'"
+                      data-inspector-mode="diff"
+                      @click="encodeInspectorMode = 'diff'"
+                    >
+                      Mapa de diferencias
+                    </button>
+                    <button
+                      type="button"
+                      class="btn"
+                      :class="encodeInspectorMode === 'bitplane' ? 'btn-primary' : 'btn-outline-secondary'"
+                      data-inspector-mode="bitplane"
+                      @click="encodeInspectorMode = 'bitplane'"
+                    >
+                      Plano de bit (0–7)
+                    </button>
+                  </div>
+
+                  <template v-if="encodeInspectorMode === 'bitplane'">
+                    <select
+                      id="encode-inspector-plane"
+                      v-model.number="encodeInspectorPlane"
+                      class="form-select form-select-sm w-auto"
+                      aria-label="Plano de bit"
+                    >
+                      <option :value="0">Plano 0 (LSB)</option>
+                      <option :value="1">Plano 1</option>
+                      <option :value="2">Plano 2</option>
+                      <option :value="3">Plano 3</option>
+                      <option :value="4">Plano 4</option>
+                      <option :value="5">Plano 5</option>
+                      <option :value="6">Plano 6</option>
+                      <option :value="7">Plano 7 (MSB)</option>
+                    </select>
+
+                    <select
+                      id="encode-inspector-channel"
+                      v-model="encodeInspectorChannel"
+                      class="form-select form-select-sm w-auto"
+                      aria-label="Canal de color"
+                    >
+                      <option value="rgb">RGB</option>
+                      <option value="r">Canal R</option>
+                      <option value="g">Canal G</option>
+                      <option value="b">Canal B</option>
+                    </select>
+
+                    <div v-if="canZoomEncodeInspector" class="form-check form-check-inline mb-0 ms-1">
+                      <input
+                        id="encode-inspector-zoom"
+                        v-model="encodeInspectorZoom1x1"
+                        class="form-check-input"
+                        type="checkbox"
+                      >
+                      <label class="form-check-label small" for="encode-inspector-zoom">
+                        Zoom 1:1
+                      </label>
+                    </div>
+                  </template>
+                </div>
+
+                <div class="bg-body border rounded p-2 text-center">
+                  <canvas
+                    id="encode-inspector-canvas"
+                    ref="encodeInspectorCanvas"
+                    class="inspector-canvas rounded"
+                    aria-label="Canvas del inspector visual de bits"
+                  ></canvas>
+                </div>
+
+                <div v-if="encodeInspectorStats" class="small mt-2">
+                  <template v-if="encodeInspectorStats.mode === 'diff'">
+                    <div class="fw-semibold">
+                      {{ formatNumber(encodeInspectorStats.changedPixels) }} píxeles modificados
+                      ({{ formatPercent(encodeInspectorStats.changedPercent) }}) ·
+                      Δ máx: {{ encodeInspectorStats.maxDelta }}
+                      <span class="text-muted fw-normal">
+                        · {{ formatNumber(encodeInspectorStats.litBuckets) }} bloques visibles
+                      </span>
+                    </div>
+                    <div class="text-muted d-flex flex-wrap gap-2 mt-1">
+                      <span><span class="legend-dot me-1" style="background: #ff00d4;"></span>±1 (plano 0)</span>
+                      <span><span class="legend-dot me-1" style="background: #ffd60a;"></span>Δ 2–3</span>
+                      <span><span class="legend-dot me-1" style="background: #ff7a00;"></span>Δ 4–15</span>
+                      <span><span class="legend-dot me-1" style="background: #ff2430;"></span>Δ ≥ 16</span>
+                      <span><span class="legend-dot me-1" style="background: #18202c;"></span>A &lt; 255 excluido</span>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="fw-semibold">
+                      Plano {{ encodeInspectorStats.plane }} · canal {{ encodeInspectorStats.channel.toUpperCase() }}
+                      ({{ encodeInspectorStats.width }} × {{ encodeInspectorStats.height }} px)
+                    </div>
+                    <div class="text-muted mt-1">
+                      {{ formatNumber(encodeInspectorStats.opaquePixels) }} píxeles opacos ·
+                      {{ formatNumber(encodeInspectorStats.skippedPixels) }} excluidos
+                      (<span class="legend-dot mx-1" style="background: #243042;"></span>A &lt; 255).
+                      Bit 0 = negro, bit 1 = amplificado a 255.
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </details>
+
             <div class="alert alert-warning py-2 small mb-0" role="note">
               <strong>Importante al enviar:</strong> comparte este archivo como <strong>Documento / Archivo adjunto</strong> (o por correo/Drive). Si lo envías como "Foto" en WhatsApp, Telegram o redes sociales, se recomprimirá y se perderán los bits del mensaje.
             </div>
@@ -729,6 +864,84 @@
               </div>
             </div>
           </div>
+
+          <details
+            v-if="decodeImg"
+            id="decode-inspector"
+            class="border rounded p-3 bg-body-tertiary mb-3"
+            :open="decodeInspectorOpen"
+            @toggle="onDecodeInspectorToggle"
+          >
+            <summary class="fw-semibold small options-summary">
+              Inspector visual de bits (Rayos X)
+            </summary>
+
+            <div v-if="decodeInspectorOpen" class="mt-3">
+              <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                <select
+                  id="decode-inspector-plane"
+                  v-model.number="decodeInspectorPlane"
+                  class="form-select form-select-sm w-auto"
+                  aria-label="Plano de bit en Leer mensaje"
+                >
+                  <option :value="0">Plano 0 (LSB)</option>
+                  <option :value="1">Plano 1</option>
+                  <option :value="2">Plano 2</option>
+                  <option :value="3">Plano 3</option>
+                  <option :value="4">Plano 4</option>
+                  <option :value="5">Plano 5</option>
+                  <option :value="6">Plano 6</option>
+                  <option :value="7">Plano 7 (MSB)</option>
+                </select>
+
+                <select
+                  id="decode-inspector-channel"
+                  v-model="decodeInspectorChannel"
+                  class="form-select form-select-sm w-auto"
+                  aria-label="Canal de color en Leer mensaje"
+                >
+                  <option value="rgb">RGB</option>
+                  <option value="r">Canal R</option>
+                  <option value="g">Canal G</option>
+                  <option value="b">Canal B</option>
+                </select>
+
+                <div v-if="canZoomDecodeInspector" class="form-check form-check-inline mb-0 ms-1">
+                  <input
+                    id="decode-inspector-zoom"
+                    v-model="decodeInspectorZoom1x1"
+                    class="form-check-input"
+                    type="checkbox"
+                  >
+                  <label class="form-check-label small" for="decode-inspector-zoom">
+                    Zoom 1:1
+                  </label>
+                </div>
+              </div>
+
+              <div class="bg-body border rounded p-2 text-center">
+                <canvas
+                  id="decode-inspector-canvas"
+                  ref="decodeInspectorCanvas"
+                  class="inspector-canvas rounded"
+                  aria-label="Canvas del inspector de planos de bits en Leer mensaje"
+                ></canvas>
+              </div>
+
+              <div v-if="decodeInspectorStats" class="small mt-2">
+                <div class="fw-semibold">
+                  Plano {{ decodeInspectorStats.plane }} · canal {{ decodeInspectorStats.channel.toUpperCase() }}
+                  ({{ decodeInspectorStats.width }} × {{ decodeInspectorStats.height }} px)
+                </div>
+                <div class="text-muted mt-1">
+                  {{ formatNumber(decodeInspectorStats.opaquePixels) }} píxeles opacos ·
+                  {{ formatNumber(decodeInspectorStats.skippedPixels) }} excluidos
+                  (<span class="legend-dot mx-1" style="background: #243042;"></span>A &lt; 255).
+                  Bit 0 = negro, bit 1 = amplificado a 255.
+                </div>
+              </div>
+            </div>
+          </details>
 
           <div v-if="needsDecodePassword" class="card border-primary mb-3">
             <div class="card-header bg-primary-subtle d-flex justify-content-between align-items-center flex-wrap gap-2">

@@ -10,6 +10,7 @@ import {
   onUnmounted
 } from './vendor/vue.esm-browser.prod.js';
 import * as Stego from './stego.js';
+import * as LsbInspector from './inspector.js';
 
 const THEME_STORAGE_KEY = 'stego-theme';
 const MAX_RESIZE_DIM = 1600;
@@ -303,6 +304,22 @@ createApp({
     const copied = ref(false);
     let copyTimer = null;
 
+    // Inspector visual "Rayos X" (renderizado perezoso solo al abrir <details>)
+    const encodeInspectorOpen = ref(false);
+    const encodeInspectorCanvas = ref(null);
+    const encodeInspectorMode = ref('diff');
+    const encodeInspectorPlane = ref(0);
+    const encodeInspectorChannel = ref('rgb');
+    const encodeInspectorZoom1x1 = ref(false);
+    const encodeInspectorStats = shallowRef(null);
+
+    const decodeInspectorOpen = ref(false);
+    const decodeInspectorCanvas = ref(null);
+    const decodeInspectorPlane = ref(0);
+    const decodeInspectorChannel = ref('rgb');
+    const decodeInspectorZoom1x1 = ref(false);
+    const decodeInspectorStats = shallowRef(null);
+
     const isEncryptedEncode = computed(() => encodePassword.value.length > 0);
     const isScatteredEncode = computed(() => isEncryptedEncode.value && useScatter.value);
     const isCompressedActive = computed(() => useCompression.value && compressionSupported);
@@ -473,11 +490,30 @@ createApp({
       () => Boolean(decodeMeta.value?.encrypted) && !decoded.value
     );
 
+    const canZoomEncodeInspector = computed(
+      () =>
+        Boolean(encodeResult.value?.encodedImageData) &&
+        Math.max(
+          encodeResult.value.encodedImageData.width,
+          encodeResult.value.encodedImageData.height
+        ) > LsbInspector.DEFAULT_MAX_DIM
+    );
+
+    const canZoomDecodeInspector = computed(
+      () =>
+        Boolean(decodeImg.value) &&
+        Math.max(decodeImg.value.width, decodeImg.value.height) > LsbInspector.DEFAULT_MAX_DIM
+    );
+
     function clearEncodeResult() {
       if (encodeResult.value?.downloadUrl) {
         URL.revokeObjectURL(encodeResult.value.downloadUrl);
       }
       encodeResult.value = null;
+      encodeInspectorOpen.value = false;
+      encodeInspectorMode.value = 'diff';
+      encodeInspectorStats.value = null;
+      encodeInspectorZoom1x1.value = false;
     }
 
     function resetLivePreview() {
@@ -527,6 +563,9 @@ createApp({
       decoded.value = null;
       decodeError.value = '';
       copied.value = false;
+      decodeInspectorOpen.value = false;
+      decodeInspectorStats.value = null;
+      decodeInspectorZoom1x1.value = false;
       if (decodeFileInput.value) {
         decodeFileInput.value.value = '';
       }
@@ -745,13 +784,108 @@ createApp({
       }
     );
 
-    // Al volver a la pestaña "Ocultar mensaje", el <canvas> se remonta y necesita repintado.
+    // Al volver a la pestaña "Ocultar mensaje" o "Leer mensaje", los <canvas> desmontados necesitan repintado.
     watch(activeTab, async (tab) => {
-      if (tab === 'encode' && lastPreviewFrame && isDegrading.value) {
-        await nextTick();
-        paintFrameToCanvas(lastPreviewFrame);
+      if (tab === 'encode') {
+        if (lastPreviewFrame && isDegrading.value) {
+          await nextTick();
+          paintFrameToCanvas(lastPreviewFrame);
+        }
+        if (encodeInspectorOpen.value && encodeResult.value?.encodedImageData) {
+          await renderEncodeInspector();
+        }
+      } else if (tab === 'decode') {
+        if (decodeInspectorOpen.value && decodeImg.value?.imageData) {
+          await renderDecodeInspector();
+        }
       }
     });
+
+    async function renderEncodeInspector() {
+      if (!encodeInspectorOpen.value || !encodeImg.value || !encodeResult.value?.encodedImageData) {
+        return;
+      }
+      await nextTick();
+      const canvas = encodeInspectorCanvas.value;
+      if (!canvas) return;
+
+      if (encodeInspectorMode.value === 'diff') {
+        encodeInspectorStats.value = {
+          mode: 'diff',
+          ...LsbInspector.renderDiffHeatmap(
+            canvas,
+            encodeImg.value.imageData,
+            encodeResult.value.encodedImageData,
+            { maxDim: LsbInspector.DEFAULT_MAX_DIM }
+          )
+        };
+      } else {
+        encodeInspectorStats.value = {
+          mode: 'bitplane',
+          ...LsbInspector.renderBitPlane(canvas, encodeResult.value.encodedImageData, {
+            channel: encodeInspectorChannel.value,
+            plane: encodeInspectorPlane.value,
+            maxDim: LsbInspector.DEFAULT_MAX_DIM,
+            zoom1x1: canZoomEncodeInspector.value && encodeInspectorZoom1x1.value
+          })
+        };
+      }
+    }
+
+    async function renderDecodeInspector() {
+      if (!decodeInspectorOpen.value || !decodeImg.value?.imageData) {
+        return;
+      }
+      await nextTick();
+      const canvas = decodeInspectorCanvas.value;
+      if (!canvas) return;
+
+      decodeInspectorStats.value = LsbInspector.renderBitPlane(canvas, decodeImg.value.imageData, {
+        channel: decodeInspectorChannel.value,
+        plane: decodeInspectorPlane.value,
+        maxDim: LsbInspector.DEFAULT_MAX_DIM,
+        zoom1x1: canZoomDecodeInspector.value && decodeInspectorZoom1x1.value
+      });
+    }
+
+    function onEncodeInspectorToggle(event) {
+      encodeInspectorOpen.value = Boolean(event.target.open);
+    }
+
+    function onDecodeInspectorToggle(event) {
+      decodeInspectorOpen.value = Boolean(event.target.open);
+    }
+
+    watch(
+      [
+        encodeInspectorOpen,
+        encodeInspectorMode,
+        encodeInspectorPlane,
+        encodeInspectorChannel,
+        encodeInspectorZoom1x1,
+        encodeResult
+      ],
+      () => {
+        if (encodeInspectorOpen.value && encodeResult.value?.encodedImageData) {
+          renderEncodeInspector();
+        }
+      }
+    );
+
+    watch(
+      [
+        decodeInspectorOpen,
+        decodeInspectorPlane,
+        decodeInspectorChannel,
+        decodeInspectorZoom1x1,
+        decodeImg
+      ],
+      () => {
+        if (decodeInspectorOpen.value && decodeImg.value?.imageData) {
+          renderDecodeInspector();
+        }
+      }
+    );
 
     function onWindowPaste(event) {
       const file = extractPastedImageFile(event);
@@ -1031,6 +1165,11 @@ createApp({
 
         encodeResult.value = {
           blob,
+          encodedImageData: {
+            width: encoded.width,
+            height: encoded.height,
+            data: encoded.data
+          },
           inputSize: encodeImg.value.fileSize ?? 0,
           outputSize: blob.size,
           downloadUrl,
@@ -1135,6 +1274,9 @@ createApp({
       decoded.value = null;
       decodeError.value = '';
       copied.value = false;
+      decodeInspectorOpen.value = false;
+      decodeInspectorStats.value = null;
+      decodeInspectorZoom1x1.value = false;
 
       try {
         const loaded = await Stego.loadImageFile(file);
@@ -1264,6 +1406,23 @@ createApp({
       decodeError,
       isDraggingDecode,
       copied,
+      encodeInspectorOpen,
+      encodeInspectorCanvas,
+      encodeInspectorMode,
+      encodeInspectorPlane,
+      encodeInspectorChannel,
+      encodeInspectorZoom1x1,
+      encodeInspectorStats,
+      canZoomEncodeInspector,
+      decodeInspectorOpen,
+      decodeInspectorCanvas,
+      decodeInspectorPlane,
+      decodeInspectorChannel,
+      decodeInspectorZoom1x1,
+      decodeInspectorStats,
+      canZoomDecodeInspector,
+      onEncodeInspectorToggle,
+      onDecodeInspectorToggle,
       isEncryptedEncode,
       isScatteredEncode,
       isCompressedActive,
